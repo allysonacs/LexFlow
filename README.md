@@ -29,6 +29,10 @@ lexflow-api ──► lexflow-infrastructure ──► lexflow-application ─�
 
 O pacote raiz é `com.lexflow`. A classe `LexFlowApplication` fica nesse pacote para que o component scan encontre os beans de todos os módulos.
 
+### Cobertura de testes
+
+O módulo `lexflow-domain` exige no mínimo 80% de cobertura de linha, conforme a seção 13 da base de conhecimento. A verificação roda dentro do `./gradlew build` e quebra o build se a cobertura cair. O relatório em HTML fica em `lexflow-domain/build/reports/jacoco/test/html/index.html`.
+
 ### Configuração base do Testcontainers
 
 O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `PostgresTestcontainersConfiguration`. Ela sobe um PostgreSQL com pgvector e conecta o Spring Boot a ele automaticamente, por meio de `@ServiceConnection`. Os testes de integração de qualquer módulo podem importar essa classe:

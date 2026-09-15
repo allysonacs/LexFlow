@@ -19,6 +19,7 @@ subprojects {
         // O BOM entra só como restrição de versão nos testes; não adiciona Spring ao classpath
         "testImplementation"(platform(rootProject.libs.spring.boot.bom))
         "testImplementation"(rootProject.libs.junit.jupiter)
+        "testImplementation"(rootProject.libs.assertj.core)
         "testRuntimeOnly"(rootProject.libs.junit.platform.launcher)
     }
 
