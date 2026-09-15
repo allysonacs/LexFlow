@@ -1,0 +1,28 @@
+package com.lexflow;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+
+/**
+ * Verifica que o contexto da aplicação sobe e que o health check responde {@code UP}.
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class LexFlowApplicationTest {
+
+    @Autowired
+    private TestRestTemplate restTemplate;
+
+    @Test
+    void healthEndpointShouldReturnUp() {
+        ResponseEntity<String> response = restTemplate.getForEntity("/actuator/health", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).contains("\"status\":\"UP\"");
+    }
+}

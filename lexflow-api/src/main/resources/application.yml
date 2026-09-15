@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: lexflow
+  profiles:
+    # Perfil usado quando nenhum outro é informado (ex.: SPRING_PROFILES_ACTIVE=prod)
+    default: dev
+  threads:
+    virtual:
+      enabled: true
+  # Credenciais do banco já parametrizadas; passam a ser usadas quando a persistência entrar (Prompt 03)
+  datasource:
+    url: ${LEXFLOW_DB_URL}
+    username: ${LEXFLOW_DB_USERNAME}
+    password: ${LEXFLOW_DB_PASSWORD}
+
+server:
+  port: ${LEXFLOW_SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: ${LEXFLOW_DB_URL:jdbc:postgresql://localhost:5432/lexflow}
+    username: ${LEXFLOW_DB_USERNAME:lexflow}
+    password: ${LEXFLOW_DB_PASSWORD:lexflow}
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+management:
+  endpoint:
+    health:
+      show-details: never
