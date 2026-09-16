@@ -71,6 +71,15 @@ public class ProcessingEventEntity {
         this.processedAt = processedAt;
     }
 
+    /**
+     * Conclui o evento: usado tanto pelo consumo de fila quanto pelo controle de idempotência da
+     * ingestão, que só libera a resposta repetida depois que a demanda está gravada.
+     */
+    public void markProcessed(Instant processedAt) {
+        this.status = ProcessingEventStatus.PROCESSED;
+        this.processedAt = processedAt;
+    }
+
     public UUID getId() {
         return id;
     }

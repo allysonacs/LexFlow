@@ -59,6 +59,8 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - **`LegalCaseStatusTransitionService`** é o **ponto único de mudança de status** do sistema. Nenhum outro componente — controller, consumer de fila, job ou repositório — pode alterar o `LegalCaseStatus` diretamente. O serviço valida a transição pelas regras do domínio e devolve, na mesma operação, a demanda já no novo status e o `LegalCaseStatusHistoryEntry` correspondente. Os dois andam juntos justamente para que nenhuma demanda mude de status sem deixar rastro no histórico.
 - O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, entra junto com os casos de uso que persistem a demanda.
 - O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
+- **`ReceiveLegalCaseService`** é o caso de uso de ingestão: valida os arquivos, trata a idempotência, grava demanda, histórico e metadados em uma transação só e publica o evento de recebimento. **`FindLegalCaseService`** responde à consulta de status.
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `LegalCaseIngestionIdempotencyStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
@@ -68,6 +70,32 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - As colunas `jsonb` usam `@JdbcTypeCode(SqlTypes.JSON)` e o `embedding` usa o tipo `vector`, através do módulo `hibernate-vector`.
 
 Nos testes, o Hibernate roda com `ddl-auto: validate`. Se uma entidade e uma migration divergirem, o contexto nem sobe — foi assim que uma divergência de tipo de coluna apareceu já na primeira execução.
+
+### API REST (`lexflow-api`)
+
+| Endpoint | Descrição |
+|---|---|
+| `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference` e um ou mais arquivos. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
+| `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados. |
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/legal-cases \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -F "caseType=CONTRACT_SIGNING" \
+  -F "requester=ana.silva" \
+  -F "priority=HIGH" \
+  -F "files=@contrato.pdf"
+```
+
+Três decisões que valem registrar:
+
+- **A ingestão não chama IA.** O endpoint grava a demanda e publica um evento; classificação, extração e análise acontecem depois, fora do ciclo da requisição. O adapter de fila entra no Prompt 07 — até lá o evento apenas vai para o log, pelo mesmo ponto de extensão.
+- **Idempotência pelo cabeçalho `Idempotency-Key`.** A chave é reservada em `processing_events`, cujo índice único é o que de fato impede a duplicação: duas réplicas da API que recebam a mesma chave ao mesmo tempo não conseguem criar duas demandas. Um reenvio com a mesma chave devolve `201` com a demanda original, sem criar nada e sem publicar novo evento. A chave do cliente é gravada com o prefixo `legal-case-ingestion:`, para nunca colidir com a chave de uma mensagem de fila.
+- **Formatos aceitos são regra de domínio,** não configuração da camada web: `DocumentFormat` aceita `pdf`, `docx`, `jpg`/`jpeg` e `png`. A extensão é que decide — um `application/octet-stream` genérico é tolerado, mas um mime type que contradiz a extensão é recusado. No banco vai sempre o tipo canônico do formato.
+
+Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`), produzido pelo `GlobalExceptionHandler`: exceções de domínio viram `400`, `LegalCaseNotFoundException` vira `404`, conflitos de idempotência e de transição viram `409`, e qualquer outra exceção vira `500` com mensagem genérica — o detalhe fica no log, nunca na resposta.
+
+O binário dos arquivos ainda **não é gravado**: o `DocumentStoragePort` tem uma implementação provisória que apenas reserva o caminho em `documents.storage_path`. O adapter de S3/MinIO entra no Prompt 06.
 
 ## Como executar
 
@@ -96,6 +124,7 @@ Para encerrar o banco local: `docker compose stop` (ou `docker compose down -v`,
 ./gradlew :lexflow-domain:test          # testes unitários, não precisam de Docker
 ./gradlew :lexflow-application:test     # testes unitários, não precisam de Docker
 ./gradlew :lexflow-infrastructure:test  # testes de integração, precisam de Docker
+./gradlew :lexflow-api:test             # testes de integração da API, precisam de Docker
 ```
 
 Os testes de integração sobem um PostgreSQL com pgvector via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como todos herdam de `AbstractPersistenceIT`, com a mesma configuração, o Spring reaproveita o contexto e o container entre as classes de teste.
@@ -127,6 +156,8 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_DB_URL` | URL JDBC do PostgreSQL |
 | `LEXFLOW_DB_USERNAME` | Usuário do banco |
 | `LEXFLOW_DB_PASSWORD` | Senha do banco |
+| `LEXFLOW_MAX_FILE_SIZE` | Tamanho máximo de cada arquivo enviado (padrão `25MB`) |
+| `LEXFLOW_MAX_REQUEST_SIZE` | Tamanho máximo do multipart inteiro (padrão `100MB`) |
 
 ## Convenções
 

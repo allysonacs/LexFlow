@@ -12,6 +12,16 @@ spring:
     url: ${LEXFLOW_DB_URL}
     username: ${LEXFLOW_DB_USERNAME}
     password: ${LEXFLOW_DB_PASSWORD}
+  jpa:
+    hibernate:
+      # O schema é do Flyway; o Hibernate apenas confere se as entidades batem com ele.
+      ddl-auto: validate
+    open-in-view: false
+  servlet:
+    multipart:
+      # Limites da ingestão de documentos (Prompt 05). Acima disso a API responde 413.
+      max-file-size: ${LEXFLOW_MAX_FILE_SIZE:25MB}
+      max-request-size: ${LEXFLOW_MAX_REQUEST_SIZE:100MB}
 
 server:
   port: ${LEXFLOW_SERVER_PORT:8080}

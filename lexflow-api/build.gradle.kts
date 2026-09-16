@@ -14,4 +14,7 @@ dependencies {
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(testFixtures(project(":lexflow-infrastructure")))
+    // Os testes de integração conferem no banco o que a API gravou; em produção o módulo continua
+    // sem enxergar JPA, que chega apenas em tempo de execução, por lexflow-infrastructure.
+    testImplementation(libs.spring.boot.starter.data.jpa)
 }

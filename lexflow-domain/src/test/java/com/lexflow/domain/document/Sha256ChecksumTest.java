@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,5 +37,26 @@ class Sha256ChecksumTest {
     @Test
     void shouldRejectNull() {
         assertThatNullPointerException().isThrownBy(() -> Sha256Checksum.of(null));
+    }
+
+    @Test
+    @DisplayName("o hash do conteúdo vazio é o valor conhecido do SHA-256")
+    void shouldHashEmptyContent() {
+        assertThat(Sha256Checksum.ofContent(new byte[0])).isEqualTo(Sha256Checksum.of(VALID));
+    }
+
+    @Test
+    @DisplayName("conteúdos iguais geram o mesmo hash e conteúdos diferentes, hashes diferentes")
+    void shouldHashContent() {
+        byte[] content = "conteúdo do contrato".getBytes(StandardCharsets.UTF_8);
+
+        assertThat(Sha256Checksum.ofContent(content)).isEqualTo(Sha256Checksum.ofContent(content.clone()));
+        assertThat(Sha256Checksum.ofContent(content))
+                .isNotEqualTo(Sha256Checksum.ofContent("outro conteúdo".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void shouldRejectNullContent() {
+        assertThatNullPointerException().isThrownBy(() -> Sha256Checksum.ofContent(null));
     }
 }

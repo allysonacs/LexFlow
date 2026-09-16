@@ -3,6 +3,7 @@ package com.lexflow.domain.ai;
 import com.lexflow.domain.legalcase.LegalCaseType;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -34,9 +35,15 @@ public enum QuestionKey {
     /** "Essa demanda está de acordo com a legislação e com a política da empresa?" */
     COMPLIES_WITH_LAW_AND_POLICY;
 
-    /** Perguntas feitas para qualquer tipo de demanda. */
-    private static final Set<QuestionKey> COMMON_QUESTIONS =
-            Set.of(HAS_SUFFICIENT_DOCUMENTATION, COMPLIES_WITH_LAW_AND_POLICY);
+    /**
+     * Perguntas feitas para qualquer tipo de demanda.
+     *
+     * <p>Usa {@link LinkedHashSet}, e não {@code Set.of}, porque a ordem faz parte do contrato de
+     * {@link #applicableTo}: a ordem de iteração de um {@code Set.of} varia a cada execução da JVM, o
+     * que tornaria instável tanto a apresentação das perguntas quanto os testes.
+     */
+    private static final Set<QuestionKey> COMMON_QUESTIONS = Collections.unmodifiableSet(
+            new LinkedHashSet<>(List.of(HAS_SUFFICIENT_DOCUMENTATION, COMPLIES_WITH_LAW_AND_POLICY)));
 
     /**
      * Perguntas críticas, que passam pela segunda checagem descrita na seção 10, item 4.

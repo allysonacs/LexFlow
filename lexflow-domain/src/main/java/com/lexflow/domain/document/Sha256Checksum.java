@@ -1,5 +1,8 @@
 package com.lexflow.domain.document;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.regex.Pattern;
@@ -24,6 +27,23 @@ public record Sha256Checksum(String value) {
 
     public static Sha256Checksum of(String value) {
         return new Sha256Checksum(value);
+    }
+
+    /**
+     * Calcula o hash do conteúdo de um arquivo.
+     *
+     * <p>Usado na ingestão (Prompt 05) para registrar o checksum sem que nenhuma camada externa
+     * precise saber qual é o algoritmo combinado.
+     */
+    public static Sha256Checksum ofContent(byte[] content) {
+        Objects.requireNonNull(content, "conteúdo não pode ser nulo");
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);
+            return new Sha256Checksum(HexFormat.of().formatHex(digest));
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 é obrigatório em qualquer JVM; se faltar, o ambiente está quebrado.
+            throw new IllegalStateException("algoritmo SHA-256 indisponível nesta JVM", e);
+        }
     }
 
     @Override
