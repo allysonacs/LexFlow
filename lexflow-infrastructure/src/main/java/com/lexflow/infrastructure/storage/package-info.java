@@ -1,2 +1,5 @@
-/** Adapters de armazenamento de arquivos. O adapter definitivo de S3/MinIO entra no Prompt 06. */
+/**
+ * Armazenamento de documentos em serviço compatível com S3 (AWS S3 em produção, MinIO em
+ * desenvolvimento).
+ */
 package com.lexflow.infrastructure.storage;

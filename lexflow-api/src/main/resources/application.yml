@@ -23,6 +23,18 @@ spring:
       max-file-size: ${LEXFLOW_MAX_FILE_SIZE:25MB}
       max-request-size: ${LEXFLOW_MAX_REQUEST_SIZE:100MB}
 
+# Storage de documentos (Prompt 06). Sem endpoint, o SDK fala com o S3 da AWS; com endpoint e
+# path-style, com o MinIO local.
+lexflow:
+  storage:
+    bucket: ${LEXFLOW_STORAGE_BUCKET:lexflow-documents}
+    region: ${LEXFLOW_STORAGE_REGION:us-east-1}
+    endpoint: ${LEXFLOW_STORAGE_ENDPOINT:}
+    access-key: ${LEXFLOW_STORAGE_ACCESS_KEY:}
+    secret-key: ${LEXFLOW_STORAGE_SECRET_KEY:}
+    path-style-access: ${LEXFLOW_STORAGE_PATH_STYLE:false}
+    create-bucket-if-missing: false
+
 server:
   port: ${LEXFLOW_SERVER_PORT:8080}
   shutdown: graceful
@@ -47,6 +59,16 @@ spring:
     username: ${LEXFLOW_DB_USERNAME:lexflow}
     password: ${LEXFLOW_DB_PASSWORD:lexflow}
 
+lexflow:
+  storage:
+    endpoint: ${LEXFLOW_STORAGE_ENDPOINT:http://localhost:9000}
+    access-key: ${LEXFLOW_STORAGE_ACCESS_KEY:lexflow}
+    secret-key: ${LEXFLOW_STORAGE_SECRET_KEY:lexflow123}
+    # O MinIO endereça o bucket no caminho da URL.
+    path-style-access: true
+    # Conveniência de desenvolvimento: se o bucket não existir, a primeira gravação o cria.
+    create-bucket-if-missing: true
+
 management:
   endpoint:
     health:
@@ -57,6 +79,12 @@ spring:
   config:
     activate:
       on-profile: prod
+
+lexflow:
+  storage:
+    # Em produção o bucket vem do provisionamento, e as credenciais da cadeia padrão do SDK
+    # (role da instância ou variáveis de ambiente) — nunca deste arquivo.
+    create-bucket-if-missing: false
 
 management:
   endpoint:

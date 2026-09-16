@@ -183,7 +183,9 @@ public class ReceiveLegalCaseService {
                 continue;
             }
             UUID documentId = idGenerator.get();
-            String storagePath = documentStorage.store(legalCaseId, documentId, upload);
+            String storagePath = documentStorage
+                    .store(legalCaseId, formats.get(index), checksum, upload)
+                    .storagePath();
             documents.add(new Document(
                     documentId,
                     legalCaseId,

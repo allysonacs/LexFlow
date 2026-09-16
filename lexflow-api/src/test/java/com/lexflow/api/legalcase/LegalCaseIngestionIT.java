@@ -2,19 +2,18 @@ package com.lexflow.api.legalcase;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.lexflow.api.AbstractApiIT;
+import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.infrastructure.persistence.repository.DocumentJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.LegalCaseJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.LegalCaseStatusHistoryJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.ProcessingEventJpaRepository;
-import com.lexflow.infrastructure.testsupport.PostgresTestcontainersConfiguration;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
-import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -35,9 +34,7 @@ import org.springframework.util.MultiValueMap;
  *
  * <p>Requer Docker em execução.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(PostgresTestcontainersConfiguration.class)
-class LegalCaseIngestionIT {
+class LegalCaseIngestionIT extends AbstractApiIT {
 
     private static final String BASE_PATH = "/api/v1/legal-cases";
 
@@ -55,6 +52,9 @@ class LegalCaseIngestionIT {
 
     @Autowired
     private ProcessingEventJpaRepository processingEventRepository;
+
+    @Autowired
+    private DocumentStoragePort documentStorage;
 
     /** Monta um arquivo em memória com o nome que o servidor deve enxergar na parte multipart. */
     private static ByteArrayResource file(String fileName, String content) {
@@ -110,6 +110,12 @@ class LegalCaseIngestionIT {
             // O tipo canônico do formato, e não o "application/octet-stream" enviado pelo cliente.
             assertThat(document.getMimeType()).isEqualTo("application/pdf");
             assertThat(document.getChecksumSha256()).hasSize(64);
+            // O binário chegou ao storage e volta de lá idêntico ao que foi enviado (Prompt 06).
+            assertThat(document.getStoragePath())
+                    .isEqualTo("legal-cases/%s/%s.pdf".formatted(legalCaseId, document.getChecksumSha256()));
+            assertThat(documentStorage.retrieve(document.getStoragePath()))
+                    .asString(StandardCharsets.UTF_8)
+                    .isEqualTo("conteúdo do contrato");
         });
         // Nem o estado inicial fica de fora da linha do tempo (seção 4 da base de conhecimento).
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))

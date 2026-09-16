@@ -12,6 +12,8 @@ dependencies {
     implementation(libs.spring.boot.starter)
     implementation(libs.spring.boot.starter.data.jpa)
     implementation(libs.hibernate.vector)
+    implementation(platform(libs.awssdk.bom))
+    implementation(libs.awssdk.s3)
     implementation(libs.jackson.databind)
     implementation(libs.flyway.core)
     runtimeOnly(libs.flyway.postgresql)
@@ -22,6 +24,9 @@ dependencies {
     testFixturesApi(libs.spring.boot.testcontainers)
     testFixturesApi(libs.testcontainers.junit.jupiter)
     testFixturesApi(libs.testcontainers.postgresql)
+    testFixturesApi(libs.testcontainers.minio)
 
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(platform(libs.awssdk.bom))
+    testImplementation(libs.awssdk.s3)
 }

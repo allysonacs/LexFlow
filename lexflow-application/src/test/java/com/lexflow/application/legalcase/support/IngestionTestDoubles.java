@@ -3,6 +3,8 @@ package com.lexflow.application.legalcase.support;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.document.DocumentUpload;
+import com.lexflow.application.document.StoredDocument;
+import com.lexflow.application.exception.DocumentNotFoundInStorageException;
 import com.lexflow.application.legalcase.IdempotentIngestion;
 import com.lexflow.application.legalcase.LegalCaseIngestionIdempotencyStore;
 import com.lexflow.application.legalcase.LegalCaseReceivedEvent;
@@ -12,6 +14,8 @@ import com.lexflow.application.legalcase.LegalCaseStatusHistoryEntry;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryRepository;
 import com.lexflow.application.transaction.TransactionRunner;
 import com.lexflow.domain.document.Document;
+import com.lexflow.domain.document.DocumentFormat;
+import com.lexflow.domain.document.Sha256Checksum;
 import com.lexflow.domain.legalcase.LegalCase;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -98,19 +102,44 @@ public final class IngestionTestDoubles {
         }
     }
 
-    /** Storage que apenas devolve um caminho previsível e anota o que recebeu. */
+    /**
+     * Storage em memória, com a mesma semântica do adapter real: a chave é derivada do conteúdo, de
+     * modo que gravar o mesmo arquivo duas vezes na mesma demanda não cria um segundo objeto.
+     */
     public static final class RecordingDocumentStorage implements DocumentStoragePort {
 
+        private final Map<String, byte[]> objects = new LinkedHashMap<>();
         private final List<String> storedFileNames = new ArrayList<>();
 
         @Override
-        public String store(UUID legalCaseId, UUID documentId, DocumentUpload upload) {
+        public StoredDocument store(
+                UUID legalCaseId, DocumentFormat format, Sha256Checksum checksum, DocumentUpload upload) {
             storedFileNames.add(upload.fileName());
-            return "legal-cases/%s/documents/%s".formatted(legalCaseId, documentId);
+            String storagePath = "legal-cases/%s/%s".formatted(legalCaseId, checksum.value());
+            if (objects.containsKey(storagePath)) {
+                return new StoredDocument(storagePath, true);
+            }
+            objects.put(storagePath, upload.content());
+            return new StoredDocument(storagePath, false);
         }
 
+        @Override
+        public byte[] retrieve(String storagePath) {
+            byte[] content = objects.get(storagePath);
+            if (content == null) {
+                throw new DocumentNotFoundInStorageException(storagePath);
+            }
+            return content;
+        }
+
+        /** Nomes recebidos, na ordem, incluindo os que não geraram um objeto novo. */
         public List<String> storedFileNames() {
             return List.copyOf(storedFileNames);
+        }
+
+        /** Quantidade de objetos efetivamente guardados. */
+        public int objectCount() {
+            return objects.size();
         }
     }
 

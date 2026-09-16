@@ -19,5 +19,41 @@ services:
       timeout: 5s
       retries: 10
 
+  minio:
+    # Storage de objetos compatível com S3, usado no lugar do S3 da AWS em desenvolvimento.
+    # Do quay.io: o repositório minio/minio do Docker Hub deixou de ser público.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: lexflow-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: lexflow
+      MINIO_ROOT_PASSWORD: lexflow123
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console web
+    volumes:
+      - lexflow-minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-bucket:
+    # Cria o bucket uma vez e encerra; sem isso a primeira gravação dependeria do
+    # create-bucket-if-missing da aplicação.
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: lexflow-minio-bucket
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set lexflow http://minio:9000 lexflow lexflow123 &&
+      mc mb --ignore-existing lexflow/lexflow-documents &&
+      echo 'bucket lexflow-documents pronto'
+      "
+
 volumes:
   lexflow-postgres-data:
+  lexflow-minio-data:

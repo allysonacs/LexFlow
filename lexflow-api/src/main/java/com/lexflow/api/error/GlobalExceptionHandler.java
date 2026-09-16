@@ -1,5 +1,6 @@
 package com.lexflow.api.error;
 
+import com.lexflow.application.exception.DocumentStorageException;
 import com.lexflow.application.exception.IdempotentRequestInProgressException;
 import com.lexflow.domain.exception.DomainException;
 import com.lexflow.domain.exception.InvalidStatusTransitionException;
@@ -59,6 +60,24 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiErrorResponse> handleIdempotencyConflict(
             IdempotentRequestInProgressException e, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ApiErrorCodes.CONFLICT, e.getMessage(), request);
+    }
+
+    /**
+     * Falha do storage de documentos.
+     *
+     * <p>Vira 503, e não 500, porque a causa é uma dependência externa e não um defeito da
+     * requisição: o cliente pode tentar de novo, de preferência com a mesma {@code Idempotency-Key}.
+     * A mensagem devolvida é genérica — endereço de bucket e detalhe do SDK ficam no log.
+     */
+    @ExceptionHandler(DocumentStorageException.class)
+    public ResponseEntity<ApiErrorResponse> handleStorageFailure(
+            DocumentStorageException e, HttpServletRequest request) {
+        log.error("Falha no storage de documentos em {} {}", request.getMethod(), request.getRequestURI(), e);
+        return build(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                ApiErrorCodes.STORAGE_UNAVAILABLE,
+                "Storage de documentos indisponível; tente novamente",
+                request);
     }
 
     /**

@@ -12,6 +12,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - Spring Boot 3.5
 - Gradle 9 (Kotlin DSL), multi-módulo, com o wrapper versionado
 - PostgreSQL 17 + pgvector, com migrations em Flyway
+- MinIO (compatível com S3) para os documentos, via AWS SDK v2
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -95,14 +96,33 @@ Três decisões que valem registrar:
 
 Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`), produzido pelo `GlobalExceptionHandler`: exceções de domínio viram `400`, `LegalCaseNotFoundException` vira `404`, conflitos de idempotência e de transição viram `409`, e qualquer outra exceção vira `500` com mensagem genérica — o detalhe fica no log, nunca na resposta.
 
-O binário dos arquivos ainda **não é gravado**: o `DocumentStoragePort` tem uma implementação provisória que apenas reserva o caminho em `documents.storage_path`. O adapter de S3/MinIO entra no Prompt 06.
+### Storage de documentos (`lexflow-infrastructure`)
+
+O binário de cada arquivo vai para um serviço compatível com S3 — AWS S3 em produção, MinIO em desenvolvimento e nos testes —, através do `S3DocumentStorageAdapter`, que implementa a porta `DocumentStoragePort`. O banco guarda apenas o metadado, incluindo o caminho devolvido pelo adapter.
+
+**A chave do objeto é derivada do conteúdo:** `legal-cases/{legalCaseId}/{checksum}{extensão}`. A escolha resolve três coisas de uma vez:
+
+- **Idempotência de upload estrutural.** O mesmo arquivo reenviado para a mesma demanda cai exatamente na mesma chave, então não há um segundo objeto — e isso não depende de uma verificação que duas réplicas poderiam fazer ao mesmo tempo, ambas concluindo que o objeto não existe. Um `documentId` na chave produziria um objeto novo a cada reenvio.
+- **Retenção por demanda.** O prefixo por caso mantém os objetos de uma demanda agrupados, o que sustenta uma política de expurgo por caso (seção 12).
+- **Nome de arquivo é dado não confiável.** O nome escolhido pelo cliente não compõe o caminho; ele fica em `documents.file_name` e só a extensão é preservada, para o objeto continuar reconhecível ao ser inspecionado no bucket.
+
+Nenhum log registra o conteúdo do arquivo — apenas nome, tamanho e checksum. O `retrieve` devolve o binário para o pipeline de extração (Prompt 08). Se o storage falhar, a API responde `503`, e não `500`: a causa é uma dependência externa, e o cliente pode repetir a requisição com a mesma `Idempotency-Key`.
+
+| Propriedade (`lexflow.storage.*`) | Descrição |
+|---|---|
+| `bucket` | Bucket onde os documentos são gravados |
+| `region` | Região informada ao SDK (o MinIO ignora, mas o SDK exige uma) |
+| `endpoint` | Endereço alternativo; vazio significa o S3 da AWS |
+| `access-key` / `secret-key` | Credenciais explícitas; **em branco em produção**, para o SDK usar a cadeia padrão (role da instância ou variáveis de ambiente) |
+| `path-style-access` | `true` para o MinIO, que endereça o bucket no caminho da URL |
+| `create-bucket-if-missing` | Cria o bucket na primeira gravação; conveniência de desenvolvimento, desligada em produção |
 
 ## Como executar
 
 Pré-requisitos: um JDK instalado para rodar o Gradle e o Docker em execução. Se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente.
 
 ```bash
-# Sobe o PostgreSQL com pgvector para desenvolvimento local
+# Sobe o PostgreSQL com pgvector e o MinIO (com o bucket já criado)
 docker compose up -d
 
 # Compila todos os módulos, roda os testes e verifica a cobertura
@@ -115,7 +135,7 @@ docker compose up -d
 curl http://localhost:8080/actuator/health
 ```
 
-Para encerrar o banco local: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados).
+Para encerrar os serviços locais: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados). O console do MinIO fica em `http://localhost:9001` (usuário `lexflow`, senha `lexflow123`).
 
 ## Testes
 
@@ -127,15 +147,19 @@ Para encerrar o banco local: `docker compose stop` (ou `docker compose down -v`,
 ./gradlew :lexflow-api:test             # testes de integração da API, precisam de Docker
 ```
 
-Os testes de integração sobem um PostgreSQL com pgvector via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como todos herdam de `AbstractPersistenceIT`, com a mesma configuração, o Spring reaproveita o contexto e o container entre as classes de teste.
+Os testes de integração sobem um PostgreSQL com pgvector e um MinIO via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
+
+O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
 
 O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `PostgresTestcontainersConfiguration`, que os testes de qualquer módulo podem importar:
 
 ```java
 @SpringBootTest
-@Import(PostgresTestcontainersConfiguration.class)
+@Import({PostgresTestcontainersConfiguration.class, MinioTestcontainersConfiguration.class})
 class MeuTesteDeIntegracao { }
 ```
+
+> As imagens do MinIO vêm do `quay.io`, e não do Docker Hub: o repositório `minio/minio` do Hub deixou de ser público.
 
 ### Cobertura
 
@@ -158,6 +182,12 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_DB_PASSWORD` | Senha do banco |
 | `LEXFLOW_MAX_FILE_SIZE` | Tamanho máximo de cada arquivo enviado (padrão `25MB`) |
 | `LEXFLOW_MAX_REQUEST_SIZE` | Tamanho máximo do multipart inteiro (padrão `100MB`) |
+| `LEXFLOW_STORAGE_BUCKET` | Bucket dos documentos (padrão `lexflow-documents`) |
+| `LEXFLOW_STORAGE_REGION` | Região do SDK (padrão `us-east-1`) |
+| `LEXFLOW_STORAGE_ENDPOINT` | Endpoint alternativo; vazio aponta para o S3 da AWS |
+| `LEXFLOW_STORAGE_ACCESS_KEY` | Credencial do storage; em branco usa a cadeia padrão do SDK |
+| `LEXFLOW_STORAGE_SECRET_KEY` | Credencial do storage; em branco usa a cadeia padrão do SDK |
+| `LEXFLOW_STORAGE_PATH_STYLE` | `true` para MinIO (padrão `false`) |
 
 ## Convenções
 

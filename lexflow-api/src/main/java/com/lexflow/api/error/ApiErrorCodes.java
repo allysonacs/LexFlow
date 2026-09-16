@@ -17,6 +17,9 @@ public final class ApiErrorCodes {
     /** Conflito com o estado atual do recurso, incluindo transição de status não permitida. */
     public static final String CONFLICT = "CONFLICT";
 
+    /** Storage de documentos indisponível ou recusando a operação. */
+    public static final String STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE";
+
     /** Arquivo maior do que o limite configurado. */
     public static final String PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE";
 
