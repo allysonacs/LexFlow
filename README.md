@@ -15,6 +15,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - MinIO (compatível com S3) para os documentos, via AWS SDK v2
 - RabbitMQ para o processamento assíncrono, via Spring AMQP
 - Apache Tika 3.3 para extrair texto, com o Tesseract 5 para o OCR
+- Spring Security (HTTP Basic) para a API administrativa
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -32,15 +33,19 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 06 | Storage de documentos (S3/MinIO) | concluído |
 | 07 | Fila e orquestração assíncrona (RabbitMQ, retry, dead-letter) | concluído |
 | 08 | Classificação determinística e extração de texto (Tika + Tesseract) | concluído |
-| 09 | Checklist documental determinístico | próximo |
-| 10–19 | Cliente LLM, extração de fatos, RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 09 | Checklist documental determinístico, com API administrativa das regras | concluído |
+| 10 | Cliente LLM | próximo |
+| 11–19 | Extração de fatos, RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
-Hoje o pipeline vai da ingestão até o texto extraído, sem nenhuma chamada a LLM:
+Hoje o pipeline vai da ingestão até o checklist avaliado e o texto extraído, sem nenhuma chamada a LLM:
 
 ```
 POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING
-  grava demanda,                          classificação      texto de cada documento
-  documentos e histórico                  por palavras-chave em document_text_contents
+  grava demanda,                          classificação      checklist documental gerado e avaliado;
+  documentos (com tipo)                   por palavras-chave texto de cada documento
+  e histórico                                                em document_text_contents
+
+GET /api/v1/legal-cases/{id}/checklist ──► HAS_SUFFICIENT_DOCUMENTATION, por regra determinística
 ```
 
 As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
@@ -71,9 +76,9 @@ Java puro, sem uma única dependência. As entidades são `record` imutáveis: u
 | Pacote | Conteúdo |
 |---|---|
 | `legalcase` | `LegalCase` (agregado raiz), `LegalCaseStatus`, `LegalCaseType`, `CasePriority`, `LegalCaseStatusTransition` e `LegalCaseStatusTransitionRules` |
-| `document` | `Document`, `Sha256Checksum`, `DocumentFormat`, `DocumentTextContent`, `TextExtractionMethod` e `TextExtractionStatus` |
+| `document` | `Document`, `Sha256Checksum`, `DocumentFormat`, `DocumentTypeCode`, `DocumentTextContent`, `TextExtractionMethod` e `TextExtractionStatus` |
 | `classification` | `LegalCaseKeywordClassifier`, `LegalCaseClassification`, `KeywordClassification` e `ClassificationOutcome` |
-| `checklist` | `ChecklistRule`, `DocumentChecklistItem`, `ChecklistItemStatus`, `DocumentChecklist` |
+| `checklist` | `ChecklistRule`, `DocumentChecklistItem`, `ChecklistItemStatus` e `DocumentChecklist` (gera, avalia e responde `HAS_SUFFICIENT_DOCUMENTATION`) |
 | `ai` | `AiExtractedFact`, `AiAnalysisResponse`, `ConfidenceScore`, `QuestionKey`, `VerificationStatus` |
 | `decision` | `Decision`, `DecisionType` |
 | `exception` | `DomainException` (base) e as exceções específicas de cada regra |
@@ -91,13 +96,22 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, é o `LegalCaseStatusHistoryRepositoryAdapter`.
 - O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
 - **`ReceiveLegalCaseService`** é o caso de uso de ingestão: valida os arquivos, trata a idempotência, grava demanda, histórico e metadados em uma transação só e publica o evento de recebimento. **`FindLegalCaseService`** responde à consulta de status.
-- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, classifica a demanda, leva o status até `EXTRACTING` e extrai o texto dos documentos (detalhes em [Classificação e extração de texto](#classificação-e-extração-de-texto)). Ele devolve um `LegalCaseProcessingResult` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
+- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, classifica a demanda, leva o status até `EXTRACTING`, gera o checklist documental e extrai o texto dos documentos (detalhes em [Classificação e extração de texto](#classificação-e-extração-de-texto)). Ele devolve um `LegalCaseProcessingResult` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
 - **`ExtractDocumentTextService`** extrai o texto de cada documento de uma demanda e pula os que já foram lidos.
-- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
+- **`DocumentChecklistService`** gera e avalia o checklist documental e responde à consulta. **`ManageChecklistRulesService`** é o CRUD das regras. Detalhes em [Checklist documental](#checklist-documental-lexflow-application-e-lexflow-api).
+- `PageQuery` e `PageResult` dão paginação às listagens sem depender do Spring Data.
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `ChecklistRuleRepository`, `DocumentChecklistItemRepository`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
-- **Migrations Flyway** em `src/main/resources/db/migration`. A `V1__init_schema.sql` cria as 13 tabelas da seção 6 da base de conhecimento, habilita a extensão `vector` e cria os índices, incluindo o índice vetorial HNSW em `knowledge_base_chunks(embedding)` e o índice único de `processing_events(idempotency_key)`. A `V2` acrescenta `legal_cases.description` e a `V3` cria `document_text_contents`, ambas do Prompt 08.
+- **Migrations Flyway** em `src/main/resources/db/migration`. A `V1__init_schema.sql` cria as 13 tabelas da seção 6 da base de conhecimento, habilita a extensão `vector` e cria os índices, incluindo o índice vetorial HNSW em `knowledge_base_chunks(embedding)` e o índice único de `processing_events(idempotency_key)`. As migrations seguintes:
+
+  | Migration | Prompt | Conteúdo |
+  |---|---|---|
+  | `V2` | 08 | coluna `legal_cases.description` |
+  | `V3` | 08 | tabela `document_text_contents` |
+  | `V4` | 09 | coluna `documents.document_type`, índices únicos de regras e de itens, restrições de consistência dos itens |
+  | `V5` | 09 | regras iniciais do checklist (seed) |
 - **Entidades JPA** em `persistence/entity`, separadas das entidades de domínio: o módulo `lexflow-domain` não tem nenhuma anotação de persistência. A conversão entre os dois mundos fica nos mappers de `persistence/mapper`.
 - **Repositórios Spring Data** em `persistence/repository`, um por tabela.
 - As colunas `jsonb` usam `@JdbcTypeCode(SqlTypes.JSON)` e o `embedding` usa o tipo `vector`, através do módulo `hibernate-vector`.
@@ -108,8 +122,11 @@ Nos testes, o Hibernate roda com `ddl-auto: validate`. Se uma entidade e uma mig
 
 | Endpoint | Descrição |
 |---|---|
-| `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference`, `description` (opcional) e um ou mais arquivos. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
-| `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados. |
+| `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference`, `description` (opcional), um ou mais arquivos em `files` e, opcionalmente, `documentTypes` com o tipo de cada arquivo, na mesma ordem. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
+| `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados e o tipo de cada um. |
+| `GET /api/v1/legal-cases/{id}/checklist` | Itens do checklist, documentos obrigatórios que faltam e `hasSufficientDocumentation`. |
+| `GET/POST /api/v1/admin/checklist-rules` | Lista (paginada, com filtro `caseType`) e cria regras de checklist. **Exige o papel `ADMIN`.** |
+| `GET/PUT/DELETE /api/v1/admin/checklist-rules/{id}` | Consulta, altera e exclui uma regra. **Exige o papel `ADMIN`.** |
 
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/legal-cases \
@@ -118,7 +135,12 @@ curl -i -X POST http://localhost:8080/api/v1/legal-cases \
   -F "requester=ana.silva" \
   -F "priority=HIGH" \
   -F "description=Assinatura do contrato de licenciamento" \
-  -F "files=@contrato.pdf"
+  -F "files=@minuta.pdf" -F "documentTypes=CONTRACT_DRAFT" \
+  -F "files=@parecer.pdf" -F "documentTypes=FINANCIAL_OPINION"
+
+curl http://localhost:8080/api/v1/legal-cases/{id}/checklist
+
+curl -u admin:lexflow-admin "http://localhost:8080/api/v1/admin/checklist-rules?caseType=CONTRACT_SIGNING"
 ```
 
 Três decisões que valem registrar:
@@ -127,7 +149,20 @@ Três decisões que valem registrar:
 - **Idempotência pelo cabeçalho `Idempotency-Key`.** A chave é reservada em `processing_events`, cujo índice único é o que de fato impede a duplicação: duas réplicas da API que recebam a mesma chave ao mesmo tempo não conseguem criar duas demandas. Um reenvio com a mesma chave devolve `201` com a demanda original, sem criar nada e sem publicar novo evento. A chave do cliente é gravada com o prefixo `legal-case-ingestion:`, para nunca colidir com a chave de uma mensagem de fila.
 - **Formatos aceitos são regra de domínio,** não configuração da camada web: `DocumentFormat` aceita `pdf`, `docx`, `jpg`/`jpeg` e `png`. A extensão é que decide — um `application/octet-stream` genérico é tolerado, mas um mime type que contradiz a extensão é recusado. No banco vai sempre o tipo canônico do formato.
 
-Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`), produzido pelo `GlobalExceptionHandler`: exceções de domínio viram `400`, `LegalCaseNotFoundException` vira `404`, conflitos de idempotência e de transição viram `409`, e qualquer outra exceção vira `500` com mensagem genérica — o detalhe fica no log, nunca na resposta.
+Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`), produzido pelo `GlobalExceptionHandler` e, nos erros de autenticação, pela `SecurityConfiguration`:
+
+| Situação | HTTP | `code` |
+|---|---|---|
+| Exceção de domínio, parâmetro ou corpo JSON inválido | `400` | `INVALID_REQUEST` |
+| Credenciais ausentes ou erradas na API administrativa | `401` | `UNAUTHORIZED` |
+| Usuário autenticado sem o papel exigido | `403` | `FORBIDDEN` |
+| Demanda ou regra de checklist inexistente | `404` | `RESOURCE_NOT_FOUND` |
+| Conflito de idempotência, de transição, regra duplicada ou regra em uso | `409` | `CONFLICT` |
+| Arquivo acima do limite | `413` | `PAYLOAD_TOO_LARGE` |
+| Storage indisponível | `503` | `STORAGE_UNAVAILABLE` |
+| Qualquer outra falha | `500` | `INTERNAL_ERROR` |
+
+Nos erros `500`, a resposta traz só uma mensagem genérica; o detalhe fica no log.
 
 ### Storage de documentos (`lexflow-infrastructure`)
 
@@ -172,7 +207,7 @@ lexflow.events.dlx (topic) --[legal-case.received]--> lexflow.legal-case-receive
 
 ### Classificação e extração de texto (`lexflow-application` e `lexflow-infrastructure`)
 
-Ao consumir o evento de recebimento, o worker leva a demanda de `RECEIVED` até `EXTRACTING`, classificando-a no caminho, e extrai o texto de cada documento. Nenhuma dessas etapas chama LLM.
+Ao consumir o evento de recebimento, o worker leva a demanda de `RECEIVED` até `EXTRACTING`, classificando-a e gerando o checklist documental no caminho, e extrai o texto de cada documento. Nenhuma dessas etapas chama LLM.
 
 ```
 RECEIVED ──► CLASSIFYING ──► EXTRACTING  (a demanda permanece aqui)
@@ -208,6 +243,45 @@ As falhas seguem dois caminhos, de propósito:
 
 O texto dos documentos nunca vai para o log: o `toString` de `DocumentTextContent` e de `ExtractedText` mostra apenas o tamanho.
 
+### Checklist documental (`lexflow-application` e `lexflow-api`)
+
+É a resposta a "Esse processo tem documentação suficiente?" (`HAS_SUFFICIENT_DOCUMENTATION`), dada **só por regra de negócio**, sem LLM (seção 9 da base de conhecimento).
+
+**Regras são configuração, não código.** Cada `ChecklistRule` diz que um tipo de demanda exige um tipo de documento, identificado por um código em `UPPER_SNAKE_CASE`, e se ele é obrigatório. A migration `V5` traz um ponto de partida; a partir daí, a área jurídica mantém as regras pela API administrativa, sem deploy.
+
+| Tipo de demanda | Obrigatórios | Opcional |
+|---|---|---|
+| `SUPPLIER_HIRING` | `SUPPLIER_CNPJ_CARD`, `SUPPLIER_QUALIFICATION_DOCUMENTS` | `COMMERCIAL_PROPOSAL` |
+| `CONTRACT_SIGNING` | `CONTRACT_DRAFT`, `FINANCIAL_OPINION` | `SIGNATORY_POWERS` |
+| `SETTLEMENT_PAYMENT` | `SETTLEMENT_AGREEMENT`, `PAYMENT_INSTRUCTIONS` | `COURT_APPROVAL` |
+| `LAWSUIT_CLOSURE` | `CLOSURE_PETITION`, `CASE_PROGRESS_REPORT` | `FINAL_JUDGMENT` |
+| `PROPOSAL_ACCEPTANCE` | `PROPOSAL_DOCUMENT`, `FINANCIAL_OPINION` | `COUNTERPARTY_REGISTRATION` |
+
+**Como o checklist é montado.**
+
+1. **Tipo de cada documento.** Na ingestão, o requisitante informa o tipo em `documentTypes`, um valor por arquivo e na mesma ordem. O valor é normalizado para maiúsculas (`contract_draft` vira `CONTRACT_DRAFT`); um valor em branco significa "sem tipo".
+2. **Geração.** Na classificação, na mesma transação que leva a demanda a `EXTRACTING`, cada regra do tipo gera um item, que nasce `MISSING`.
+3. **Vínculo.** Um documento cujo tipo é o exigido pela regra torna o item `SATISFIED`. Se houver mais de um, vale o primeiro, na ordem de envio e, em caso de empate, pelo nome do arquivo.
+4. **Nova sincronização.** Sincronizar de novo não duplica itens (há um índice único por demanda e regra), só regrava o que mudou e cria itens para regras adicionadas depois.
+5. **Resposta.** A documentação é suficiente só quando o checklist já foi avaliado e **todo** item obrigatório está `SATISFIED`. Antes da classificação, a consulta responde `evaluated: false` e a documentação é sempre dada como insuficiente. Avançar o status da demanda não muda a resposta: ela depende só dos itens.
+
+**Proteções da API administrativa.**
+
+- O tipo de demanda de uma regra nunca muda.
+- A mesma regra não pode existir duas vezes no mesmo tipo (`409`).
+- Uma regra já usada por alguma demanda não pode ser excluída nem trocar o documento exigido (`409`); para deixar de exigir o documento, torne a regra opcional.
+- Descrição e obrigatoriedade podem mudar a qualquer momento. A obrigatoriedade vale já na próxima consulta, inclusive para demandas antigas.
+
+### Segurança (`lexflow-api`)
+
+Só `/api/v1/admin/**` exige autenticação: HTTP Basic, com o papel `ADMIN`, sem sessão e sem CSRF. O usuário administrador vem de `LEXFLOW_ADMIN_USERNAME` e `LEXFLOW_ADMIN_PASSWORD`.
+
+- A senha pode vir em texto ou já no formato `{bcrypt}...`; em texto, ela é transformada em hash na inicialização.
+- No perfil `dev`, o padrão é `admin` / `lexflow-admin`.
+- Em `prod` não há valor padrão, e a aplicação não sobe sem as duas variáveis.
+
+> **Limitação conhecida.** As demais rotas continuam abertas. O controle de acesso por papel da seção 12 (`ANALYST`, `LEGAL_REVIEWER`, `ADMIN`) depende da escolha do provedor de identidade e fica contido na `SecurityConfiguration`.
+
 ## Como executar
 
 Pré-requisitos:
@@ -230,6 +304,9 @@ docker compose up -d
 
 # Health check
 curl http://localhost:8080/actuator/health
+
+# Regras de checklist (usuário do perfil dev)
+curl -u admin:lexflow-admin http://localhost:8080/api/v1/admin/checklist-rules
 ```
 
 Para encerrar os serviços locais: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados). O console do MinIO fica em `http://localhost:9001` (usuário `lexflow`, senha `lexflow123`) e o do RabbitMQ em `http://localhost:15672` (usuário e senha `lexflow`).
@@ -246,7 +323,15 @@ Para encerrar os serviços locais: `docker compose stop` (ou `docker compose dow
 
 Os testes de integração sobem um PostgreSQL com pgvector, um MinIO e um RabbitMQ via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
 
-Os testes de extração (`TikaDocumentTextExtractorTest` e `LegalCaseClassificationExtractionIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
+O checklist é coberto em três níveis:
+
+- **domínio** (`DocumentChecklistTest`): geração, vínculo e suficiência;
+- **aplicação** (`DocumentChecklistServiceTest` e `ManageChecklistRulesServiceTest`): cada tipo de demanda e as proteções das regras;
+- **integração**: `ChecklistPersistenceIT` testa o seed e as restrições no banco, `ChecklistRuleAdminIT` testa o CRUD com autenticação real e `LegalCaseChecklistIT` testa o fluxo de ponta a ponta, com documentação completa e incompleta.
+
+Os testes administrativos usam códigos próprios (`IT_...`) e removem as regras que criam, porque o banco é compartilhado com os demais testes da API.
+
+Os testes de extração (`TikaDocumentTextExtractorTest`, `LegalCaseClassificationExtractionIT` e `LegalCaseChecklistIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
 
 O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
 
@@ -298,6 +383,8 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_RABBITMQ_VHOST` | Virtual host (padrão `/`) |
 | `LEXFLOW_RABBITMQ_CONCURRENCY` / `_MAX_CONCURRENCY` | Consumidores por réplica (padrão `2`–`8`) |
 | `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `4`) |
+| `LEXFLOW_ADMIN_USERNAME` | Usuário da API administrativa (padrão `admin` no perfil `dev`; obrigatório em `prod`) |
+| `LEXFLOW_ADMIN_PASSWORD` | Senha da API administrativa, em texto ou `{bcrypt}...` (padrão `lexflow-admin` no perfil `dev`; obrigatória em `prod`) |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
 | `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
 | `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |

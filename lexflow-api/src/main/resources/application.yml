@@ -64,6 +64,12 @@ lexflow:
     secret-key: ${LEXFLOW_STORAGE_SECRET_KEY:}
     path-style-access: ${LEXFLOW_STORAGE_PATH_STYLE:false}
     create-bucket-if-missing: false
+  # Administrador da API administrativa (/api/v1/admin/**, Prompt 09). A senha pode vir em texto ou já
+  # no formato do Spring Security ({bcrypt}...). Em produção não há valor padrão: sem elas, não sobe.
+  security:
+    admin:
+      username: ${LEXFLOW_ADMIN_USERNAME}
+      password: ${LEXFLOW_ADMIN_PASSWORD}
   # Extração de texto dos documentos (Prompt 08). O OCR usa o Tesseract instalado na máquina,
   # com os pacotes de idioma informados.
   extraction:
@@ -106,6 +112,10 @@ lexflow:
     path-style-access: true
     # Conveniência de desenvolvimento: se o bucket não existir, a primeira gravação o cria.
     create-bucket-if-missing: true
+  security:
+    admin:
+      username: ${LEXFLOW_ADMIN_USERNAME:admin}
+      password: ${LEXFLOW_ADMIN_PASSWORD:lexflow-admin}
 
 management:
   endpoint:

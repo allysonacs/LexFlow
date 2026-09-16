@@ -1,7 +1,10 @@
 package com.lexflow.api.error;
 
+import com.lexflow.application.checklist.ChecklistRuleInUseException;
+import com.lexflow.application.checklist.DuplicateChecklistRuleException;
 import com.lexflow.application.exception.DocumentStorageException;
 import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.domain.exception.ChecklistRuleNotFoundException;
 import com.lexflow.domain.exception.DomainException;
 import com.lexflow.domain.exception.InvalidStatusTransitionException;
 import com.lexflow.domain.exception.LegalCaseNotFoundException;
@@ -11,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -42,9 +46,9 @@ public class GlobalExceptionHandler {
         this.clock = clock;
     }
 
-    /** Demanda inexistente. */
-    @ExceptionHandler(LegalCaseNotFoundException.class)
-    public ResponseEntity<ApiErrorResponse> handleNotFound(LegalCaseNotFoundException e, HttpServletRequest request) {
+    /** Demanda ou regra de checklist inexistente. */
+    @ExceptionHandler({LegalCaseNotFoundException.class, ChecklistRuleNotFoundException.class})
+    public ResponseEntity<ApiErrorResponse> handleNotFound(DomainException e, HttpServletRequest request) {
         return build(HttpStatus.NOT_FOUND, ApiErrorCodes.RESOURCE_NOT_FOUND, e.getMessage(), request);
     }
 
@@ -55,10 +59,16 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, ApiErrorCodes.CONFLICT, e.getMessage(), request);
     }
 
-    /** Chave de idempotência reservada por uma ingestão que ainda não terminou. */
-    @ExceptionHandler(IdempotentRequestInProgressException.class)
-    public ResponseEntity<ApiErrorResponse> handleIdempotencyConflict(
-            IdempotentRequestInProgressException e, HttpServletRequest request) {
+    /**
+     * Conflitos com o estado atual: chave de idempotência reservada por uma ingestão que ainda não
+     * terminou, regra de checklist duplicada ou regra em uso que não pode ser excluída.
+     */
+    @ExceptionHandler({
+        IdempotentRequestInProgressException.class,
+        DuplicateChecklistRuleException.class,
+        ChecklistRuleInUseException.class
+    })
+    public ResponseEntity<ApiErrorResponse> handleConflict(RuntimeException e, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ApiErrorCodes.CONFLICT, e.getMessage(), request);
     }
 
@@ -94,6 +104,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiErrorResponse> handleIllegalArgument(
             IllegalArgumentException e, HttpServletRequest request) {
         return build(HttpStatus.BAD_REQUEST, ApiErrorCodes.INVALID_REQUEST, e.getMessage(), request);
+    }
+
+    /** Corpo JSON malformado ou com valor que não converte, como um {@code caseType} desconhecido. */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiErrorResponse> handleUnreadableBody(
+            HttpMessageNotReadableException e, HttpServletRequest request) {
+        return build(
+                HttpStatus.BAD_REQUEST,
+                ApiErrorCodes.INVALID_REQUEST,
+                "Corpo da requisição inválido ou malformado",
+                request);
     }
 
     /** Campo obrigatório ausente, arquivo não enviado ou valor que não converte para o tipo esperado. */

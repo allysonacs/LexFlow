@@ -2,9 +2,12 @@ package com.lexflow.api.error;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.lexflow.application.checklist.ChecklistRuleInUseException;
+import com.lexflow.application.checklist.DuplicateChecklistRuleException;
 import com.lexflow.application.exception.DocumentNotFoundInStorageException;
 import com.lexflow.application.exception.DocumentStorageException;
 import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.domain.exception.ChecklistRuleNotFoundException;
 import com.lexflow.domain.exception.InvalidStatusTransitionException;
 import com.lexflow.domain.exception.LegalCaseNotFoundException;
 import com.lexflow.domain.exception.UnknownLegalCaseTypeException;
@@ -75,10 +78,26 @@ class GlobalExceptionHandlerTest {
     @DisplayName("ingestão em andamento com a mesma chave vira 409")
     void shouldMapIdempotencyConflict() {
         ResponseEntity<ApiErrorResponse> response =
-                handler.handleIdempotencyConflict(new IdempotentRequestInProgressException("chave-1"), request());
+                handler.handleConflict(new IdempotentRequestInProgressException("chave-1"), request());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody().message()).contains("chave-1");
+    }
+
+    @Test
+    @DisplayName("regra de checklist duplicada ou em uso vira 409; regra inexistente vira 404")
+    void shouldMapChecklistRuleErrors() {
+        UUID ruleId = UUID.randomUUID();
+
+        assertThat(handler.handleConflict(
+                                new DuplicateChecklistRuleException(LegalCaseType.CONTRACT_SIGNING, "CONTRACT_DRAFT"),
+                                request())
+                        .getStatusCode())
+                .isEqualTo(HttpStatus.CONFLICT);
+        assertThat(handler.handleConflict(new ChecklistRuleInUseException(ruleId), request()).getBody().code())
+                .isEqualTo(ApiErrorCodes.CONFLICT);
+        assertThat(handler.handleNotFound(new ChecklistRuleNotFoundException(ruleId), request()).getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test

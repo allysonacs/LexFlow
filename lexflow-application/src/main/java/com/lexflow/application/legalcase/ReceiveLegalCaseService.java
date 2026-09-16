@@ -196,7 +196,8 @@ public class ReceiveLegalCaseService {
                     // "application/octet-stream" genérico não chega ao banco.
                     formats.get(index).canonicalMimeType(),
                     checksum,
-                    uploadedAt));
+                    uploadedAt,
+                    upload.documentType()));
         }
         return List.copyOf(documents);
     }

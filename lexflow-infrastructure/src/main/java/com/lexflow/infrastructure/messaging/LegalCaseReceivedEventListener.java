@@ -14,7 +14,7 @@ import org.springframework.stereotype.Component;
  * Consumidor da fila de demandas recebidas.
  *
  * <p>É de propósito uma casca fina: desserializa, delega ao caso de uso e registra o desfecho. Toda a
- * decisão — reservar o evento, classificar, extrair o texto, tratar a duplicidade — está em
+ * decisão — reservar o evento, classificar, gerar o checklist, extrair o texto, tratar a duplicidade — está em
  * {@link ProcessLegalCaseReceivedEventService}, que não conhece RabbitMQ e pode ser testado sem
  * broker nenhum.
  *
@@ -56,6 +56,11 @@ public class LegalCaseReceivedEventListener {
         }
 
         result.classificationIfPerformed().ifPresent(classification -> logClassification(event, classification));
+        result.checklistIfEvaluated().ifPresent(checklist -> log.info(
+                "Checklist: demanda={} documentação suficiente={} obrigatórios faltantes={}",
+                event.legalCaseId(),
+                checklist.hasSufficientDocumentation(),
+                checklist.missingMandatoryDocumentTypes()));
 
         // Só contagens: o texto dos documentos nunca vai para o log (seção 12).
         long failed = result.countByStatus(TextExtractionStatus.FAILED);

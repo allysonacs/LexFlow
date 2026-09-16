@@ -7,6 +7,9 @@ import java.util.UUID;
 /**
  * Metadados de um arquivo anexado a uma demanda. O binário em si vive no storage (Prompt 06) e nunca
  * trafega pelo domínio.
+ *
+ * @param documentType tipo do documento informado pelo requisitante no upload, no formato de
+ *     {@link DocumentTypeCode}; opcional. É o que vincula o documento a um item de checklist (seção 9)
  */
 public record Document(
         UUID id,
@@ -15,7 +18,8 @@ public record Document(
         String storagePath,
         String mimeType,
         Sha256Checksum checksum,
-        Instant uploadedAt) {
+        Instant uploadedAt,
+        String documentType) {
 
     public Document {
         Objects.requireNonNull(id, "id não pode ser nulo");
@@ -31,6 +35,24 @@ public record Document(
         if (mimeType == null || mimeType.isBlank()) {
             throw new IllegalArgumentException("mimeType é obrigatório");
         }
+        documentType = DocumentTypeCode.normalizeOptional(documentType);
+    }
+
+    /** Documento sem tipo informado. */
+    public Document(
+            UUID id,
+            UUID legalCaseId,
+            String fileName,
+            String storagePath,
+            String mimeType,
+            Sha256Checksum checksum,
+            Instant uploadedAt) {
+        this(id, legalCaseId, fileName, storagePath, mimeType, checksum, uploadedAt, null);
+    }
+
+    /** Indica se o documento é do tipo informado. */
+    public boolean isOfType(String documentTypeCode) {
+        return documentType != null && documentType.equals(documentTypeCode);
     }
 
     /** Indica se o arquivo é idêntico a outro já anexado à mesma demanda. */

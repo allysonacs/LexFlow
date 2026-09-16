@@ -23,6 +23,12 @@ public final class ApiErrorCodes {
     /** Arquivo maior do que o limite configurado. */
     public static final String PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE";
 
+    /** Credenciais ausentes ou inválidas. */
+    public static final String UNAUTHORIZED = "UNAUTHORIZED";
+
+    /** Credenciais válidas, mas sem o papel exigido pela rota. */
+    public static final String FORBIDDEN = "FORBIDDEN";
+
     /** Falha não prevista: nada do detalhe interno é devolvido ao cliente. */
     public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 

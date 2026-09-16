@@ -34,6 +34,9 @@ public class DocumentEntity {
     @Column(name = "uploaded_at", nullable = false)
     private Instant uploadedAt;
 
+    @Column(name = "document_type", length = 100)
+    private String documentType;
+
     protected DocumentEntity() {
         // exigido pelo JPA
     }
@@ -45,7 +48,8 @@ public class DocumentEntity {
             String storagePath,
             String mimeType,
             String checksumSha256,
-            Instant uploadedAt) {
+            Instant uploadedAt,
+            String documentType) {
         this.id = id;
         this.legalCaseId = legalCaseId;
         this.fileName = fileName;
@@ -53,6 +57,7 @@ public class DocumentEntity {
         this.mimeType = mimeType;
         this.checksumSha256 = checksumSha256;
         this.uploadedAt = uploadedAt;
+        this.documentType = documentType;
     }
 
     public UUID getId() {
@@ -81,5 +86,9 @@ public class DocumentEntity {
 
     public Instant getUploadedAt() {
         return uploadedAt;
+    }
+
+    public String getDocumentType() {
+        return documentType;
     }
 }

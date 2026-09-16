@@ -10,6 +10,9 @@ public interface DocumentRepository {
     /** Grava os metadados de todos os arquivos de uma demanda. */
     void saveAll(List<Document> documents);
 
-    /** Arquivos de uma demanda, na ordem em que foram enviados. */
+    /**
+     * Arquivos de uma demanda, em ordem estável: data de envio, depois nome e identificador. A ordem
+     * importa: quando dois documentos têm o tipo exigido por uma regra, o primeiro é o vinculado.
+     */
     List<Document> findByLegalCaseId(UUID legalCaseId);
 }

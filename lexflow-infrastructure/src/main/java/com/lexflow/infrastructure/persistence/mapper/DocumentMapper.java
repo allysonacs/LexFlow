@@ -19,7 +19,8 @@ public final class DocumentMapper {
                 document.storagePath(),
                 document.mimeType(),
                 document.checksum().value(),
-                document.uploadedAt());
+                document.uploadedAt(),
+                document.documentType());
     }
 
     public static Document toDomain(DocumentEntity entity) {
@@ -30,6 +31,7 @@ public final class DocumentMapper {
                 entity.getStoragePath(),
                 entity.getMimeType(),
                 Sha256Checksum.of(entity.getChecksumSha256()),
-                entity.getUploadedAt());
+                entity.getUploadedAt(),
+                entity.getDocumentType());
     }
 }

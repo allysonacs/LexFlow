@@ -1,10 +1,12 @@
 package com.lexflow.application.legalcase;
 
+import com.lexflow.application.checklist.DocumentChecklistService;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.event.ProcessingEventStore;
 import com.lexflow.application.event.ProcessingReservation;
 import com.lexflow.application.transaction.TransactionRunner;
+import com.lexflow.domain.checklist.DocumentChecklist;
 import com.lexflow.domain.classification.LegalCaseClassification;
 import com.lexflow.domain.classification.LegalCaseKeywordClassifier;
 import com.lexflow.domain.document.Document;
@@ -19,7 +21,7 @@ import java.util.UUID;
 
 /**
  * Caso de uso disparado pelo consumo de {@link LegalCaseReceivedEvent}: leva a demanda da caixa de
- * entrada até o texto extraído, sem nenhuma chamada a LLM.
+ * entrada até o texto extraído, com o checklist documental gerado, sem nenhuma chamada a LLM.
  *
  * <p>As etapas, na ordem:
  *
@@ -28,6 +30,8 @@ import java.util.UUID;
  *   <li><strong>classificação</strong>: o tipo informado é validado contra as palavras-chave dos
  *       nomes de arquivo e da descrição (Prompt 08), e o resultado vai para o histórico;
  *   <li><strong>{@code CLASSIFYING → EXTRACTING}</strong>;
+ *   <li><strong>checklist documental</strong> (Prompt 09): os itens das regras do tipo são gerados e
+ *       os documentos enviados são vinculados a eles, pelo tipo informado no upload;
  *   <li><strong>extração de texto</strong> de cada documento, nativa ou por OCR.
  * </ol>
  *
@@ -37,14 +41,14 @@ import java.util.UUID;
  *
  * <p><strong>A ordem das operações não é arbitrária.</strong> A reserva do evento vem antes de
  * qualquer escrita, para que uma entrega duplicada seja descartada sem efeito. As duas transições
- * ficam em uma transação só — a classificação é instantânea, e não há por que expor um
- * {@code CLASSIFYING} que ninguém chegaria a observar. A extração fica fora de qualquer transação,
+ * e o checklist ficam em uma transação só — são instantâneos, e não há por que expor um
+ * {@code CLASSIFYING} que ninguém chegaria a observar, nem uma demanda classificada sem checklist. A extração fica fora de qualquer transação,
  * porque o OCR pode levar minutos. A marca de falha também fica fora, já que um rollback apagaria o
  * próprio registro da falha.
  *
  * <p><strong>Retomada.</strong> Cada etapa olha o status atual antes de agir. Uma tentativa que
  * falhou durante a extração volta com a demanda já em {@code EXTRACTING}: a classificação não se
- * repete, e só os documentos ainda sem texto são lidos.
+ * repete, o checklist só é sincronizado (nada é recriado) e só os documentos ainda sem texto são lidos.
  */
 public class ProcessLegalCaseReceivedEventService {
 
@@ -57,6 +61,7 @@ public class ProcessLegalCaseReceivedEventService {
     private final LegalCaseStatusHistoryRepository statusHistoryRepository;
     private final LegalCaseStatusTransitionService statusTransitionService;
     private final LegalCaseKeywordClassifier classifier;
+    private final DocumentChecklistService checklistService;
     private final ExtractDocumentTextService extractDocumentTextService;
     private final ProcessingEventStore processingEventStore;
     private final TransactionRunner transactionRunner;
@@ -67,6 +72,7 @@ public class ProcessLegalCaseReceivedEventService {
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseKeywordClassifier classifier,
+            DocumentChecklistService checklistService,
             ExtractDocumentTextService extractDocumentTextService,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
@@ -77,6 +83,7 @@ public class ProcessLegalCaseReceivedEventService {
         this.statusTransitionService =
                 Objects.requireNonNull(statusTransitionService, "statusTransitionService não pode ser nulo");
         this.classifier = Objects.requireNonNull(classifier, "classifier não pode ser nulo");
+        this.checklistService = Objects.requireNonNull(checklistService, "checklistService não pode ser nulo");
         this.extractDocumentTextService =
                 Objects.requireNonNull(extractDocumentTextService, "extractDocumentTextService não pode ser nulo");
         this.processingEventStore = Objects.requireNonNull(processingEventStore, "processingEventStore não pode ser nulo");
@@ -114,13 +121,16 @@ public class ProcessLegalCaseReceivedEventService {
         }
 
         try {
-            LegalCaseClassification classification =
-                    transactionRunner.inTransaction(() -> classify(event.legalCaseId()));
+            Classified classified = transactionRunner.inTransaction(() -> classify(event.legalCaseId()));
             List<DocumentTextContent> textContents =
                     extractDocumentTextService.extractPending(event.legalCaseId());
             // Todas as etapas são retomáveis: se esta marca falhar, a próxima entrega não refaz nada.
             processingEventStore.markProcessed(event.idempotencyKey());
-            return new LegalCaseProcessingResult(LegalCaseProcessingOutcome.PROCESSED, classification, textContents);
+            return new LegalCaseProcessingResult(
+                    LegalCaseProcessingOutcome.PROCESSED,
+                    classified.classification(),
+                    classified.checklist(),
+                    textContents);
         } catch (RuntimeException e) {
             // Sem marcar como processado, a próxima entrega tenta de novo — que é o que o Prompt 07
             // pede. Esgotadas as tentativas, a mensagem vai para a dead-letter.
@@ -130,17 +140,18 @@ public class ProcessLegalCaseReceivedEventService {
     }
 
     /**
-     * Leva a demanda até {@code EXTRACTING}, classificando-a no caminho.
+     * Leva a demanda até {@code EXTRACTING}, classificando-a no caminho, e sincroniza o checklist.
      *
-     * @return a classificação feita agora, ou nulo se a demanda já estava em {@code EXTRACTING}
+     * @return a classificação feita agora (nula se a demanda já estava em {@code EXTRACTING}) e o
+     *     checklist resultante
      */
-    private LegalCaseClassification classify(UUID legalCaseId) {
+    private Classified classify(UUID legalCaseId) {
         LegalCase legalCase = legalCaseRepository
                 .findById(legalCaseId)
                 .orElseThrow(() -> new LegalCaseNotFoundException(legalCaseId));
 
         if (legalCase.status() == LegalCaseStatus.EXTRACTING) {
-            return null;
+            return new Classified(null, checklistService.synchronize(legalCase));
         }
 
         List<LegalCaseStatusHistoryEntry> history = new ArrayList<>(2);
@@ -163,7 +174,7 @@ public class ProcessLegalCaseReceivedEventService {
 
         legalCaseRepository.save(classified.legalCase());
         history.forEach(statusHistoryRepository::save);
-        return classification;
+        return new Classified(classification, checklistService.synchronize(classified.legalCase()));
     }
 
     /** Textos escolhidos pelo requisitante: a descrição e o nome de cada arquivo. */
@@ -177,4 +188,7 @@ public class ProcessLegalCaseReceivedEventService {
                 .forEach(signals::add);
         return signals;
     }
+
+    /** Resultado da etapa transacional. */
+    private record Classified(LegalCaseClassification classification, DocumentChecklist checklist) {}
 }

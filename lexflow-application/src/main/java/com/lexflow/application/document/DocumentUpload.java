@@ -1,6 +1,7 @@
 package com.lexflow.application.document;
 
 import com.lexflow.domain.document.DocumentFormat;
+import com.lexflow.domain.document.DocumentTypeCode;
 import com.lexflow.domain.exception.UnsupportedDocumentFormatException;
 import java.util.Objects;
 
@@ -17,8 +18,10 @@ import java.util.Objects;
  *
  * @param declaredMimeType tipo declarado pelo cliente; pode ser nulo ou genérico, já que a validação
  *     de formato se apoia na extensão do arquivo
+ * @param documentType tipo do documento para o checklist (ex.: {@code CONTRACT_DRAFT}); opcional e
+ *     já normalizado
  */
-public record DocumentUpload(String fileName, String declaredMimeType, byte[] content) {
+public record DocumentUpload(String fileName, String declaredMimeType, byte[] content, String documentType) {
 
     public DocumentUpload {
         Objects.requireNonNull(content, "content não pode ser nulo");
@@ -28,6 +31,12 @@ public record DocumentUpload(String fileName, String declaredMimeType, byte[] co
         if (content.length == 0) {
             throw new IllegalArgumentException("arquivo '%s' está vazio".formatted(fileName));
         }
+        documentType = DocumentTypeCode.normalizeOptional(documentType);
+    }
+
+    /** Arquivo sem tipo de documento informado. */
+    public DocumentUpload(String fileName, String declaredMimeType, byte[] content) {
+        this(fileName, declaredMimeType, content, null);
     }
 
     /**

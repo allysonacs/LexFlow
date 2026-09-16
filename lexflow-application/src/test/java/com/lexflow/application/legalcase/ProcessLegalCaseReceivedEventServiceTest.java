@@ -3,10 +3,14 @@ package com.lexflow.application.legalcase;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.lexflow.application.checklist.DocumentChecklistService;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.exception.DocumentTextExtractionException;
 import com.lexflow.application.exception.UnreadableDocumentException;
+import com.lexflow.application.legalcase.support.ChecklistTestDoubles;
+import com.lexflow.application.legalcase.support.ChecklistTestDoubles.InMemoryChecklistRuleRepository;
+import com.lexflow.application.legalcase.support.ChecklistTestDoubles.InMemoryDocumentChecklistItemRepository;
 import com.lexflow.application.legalcase.support.ExtractionTestDoubles.InMemoryDocumentTextContentRepository;
 import com.lexflow.application.legalcase.support.ExtractionTestDoubles.ScriptedTextExtractor;
 import com.lexflow.application.legalcase.support.InMemoryProcessingEventStore;
@@ -17,6 +21,7 @@ import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryLe
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryStatusHistoryRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.RecordingDocumentStorage;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.SequentialIdGenerator;
+import com.lexflow.domain.checklist.ChecklistItemStatus;
 import com.lexflow.domain.classification.ClassificationOutcome;
 import com.lexflow.domain.classification.LegalCaseKeywordClassifier;
 import com.lexflow.domain.document.Document;
@@ -56,6 +61,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
     private InMemoryDocumentTextContentRepository textContentRepository;
     private RecordingDocumentStorage storage;
     private ScriptedTextExtractor extractor;
+    private InMemoryDocumentChecklistItemRepository checklistItemRepository;
     private InMemoryProcessingEventStore processingEventStore;
     private DirectTransactionRunner transactionRunner;
     private ProcessLegalCaseReceivedEventService service;
@@ -72,12 +78,17 @@ class ProcessLegalCaseReceivedEventServiceTest {
         transactionRunner = new DirectTransactionRunner();
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         SequentialIdGenerator ids = new SequentialIdGenerator();
+        checklistItemRepository = new InMemoryDocumentChecklistItemRepository();
+        InMemoryChecklistRuleRepository ruleRepository = new InMemoryChecklistRuleRepository();
+        ChecklistTestDoubles.seedRules().forEach(ruleRepository::save);
         service = new ProcessLegalCaseReceivedEventService(
                 legalCaseRepository,
                 documentRepository,
                 statusHistoryRepository,
                 new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids),
                 new LegalCaseKeywordClassifier(),
+                new DocumentChecklistService(
+                        legalCaseRepository, documentRepository, ruleRepository, checklistItemRepository, clock, ids),
                 new ExtractDocumentTextService(
                         documentRepository, textContentRepository, storage, extractor, clock, ids),
                 processingEventStore,
@@ -104,13 +115,18 @@ class ProcessLegalCaseReceivedEventServiceTest {
     }
 
     private void givenDocument(LegalCase legalCase, String fileName, String content) {
+        givenDocument(legalCase, fileName, content, null);
+    }
+
+    private void givenDocument(LegalCase legalCase, String fileName, String content, String documentType) {
         byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         DocumentFormat format = DocumentFormat.ofFileName(fileName);
         Sha256Checksum checksum = Sha256Checksum.ofContent(bytes);
         String path = storage.store(legalCase.id(), format, checksum, new DocumentUpload(fileName, null, bytes))
                 .storagePath();
         documentRepository.saveAll(List.of(new Document(
-                UUID.randomUUID(), legalCase.id(), fileName, path, format.canonicalMimeType(), checksum, NOW)));
+                UUID.randomUUID(), legalCase.id(), fileName, path, format.canonicalMimeType(), checksum, NOW,
+                documentType)));
     }
 
     private static LegalCaseReceivedEvent eventFor(UUID legalCaseId) {
@@ -126,8 +142,8 @@ class ProcessLegalCaseReceivedEventServiceTest {
     @DisplayName("a demanda é classificada, vai até EXTRACTING e tem o texto dos documentos gravado")
     void shouldClassifyAndExtractText() {
         LegalCase legalCase = givenLegalCase(LegalCaseType.CONTRACT_SIGNING, "Assinatura do contrato", LegalCaseStatus.RECEIVED);
-        givenDocument(legalCase, "minuta_contrato.pdf", "Cláusula primeira");
-        givenDocument(legalCase, "procuracao.png", "Outorgante");
+        givenDocument(legalCase, "minuta_contrato.pdf", "Cláusula primeira", "CONTRACT_DRAFT");
+        givenDocument(legalCase, "procuracao.png", "Outorgante", "SIGNATORY_POWERS");
         LegalCaseReceivedEvent event = eventFor(legalCase.id());
 
         LegalCaseProcessingResult result = service.process(event);
@@ -140,6 +156,15 @@ class ProcessLegalCaseReceivedEventServiceTest {
         });
         assertThat(result.countByStatus(TextExtractionStatus.EXTRACTED)).isEqualTo(2);
         assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        // Checklist gerado na mesma etapa: a minuta satisfaz seu item, o parecer financeiro falta.
+        assertThat(result.checklistIfEvaluated()).get().satisfies(checklist -> {
+            assertThat(checklist.items()).hasSize(3);
+            assertThat(checklist.hasSufficientDocumentation()).isFalse();
+            assertThat(checklist.missingMandatoryDocumentTypes()).containsExactly("FINANCIAL_OPINION");
+        });
+        assertThat(checklistItemRepository.findByLegalCaseId(legalCase.id()))
+                .filteredOn(item -> item.status() == ChecklistItemStatus.SATISFIED)
+                .hasSize(2);
         assertThat(textContentRepository.findByLegalCaseId(legalCase.id())).hasSize(2);
 
         assertThat(statusHistoryRepository.all()).hasSize(2);
@@ -243,6 +268,8 @@ class ProcessLegalCaseReceivedEventServiceTest {
 
         assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.PROCESSED);
         assertThat(result.classificationIfPerformed()).isEmpty();
+        assertThat(result.checklistIfEvaluated()).get().satisfies(checklist -> assertThat(checklist.items()).hasSize(3));
+        assertThat(checklistItemRepository.all()).hasSize(3);
         assertThat(result.countByStatus(TextExtractionStatus.EXTRACTED)).isEqualTo(1);
         assertThat(statusHistoryRepository.all()).hasSize(2);
         assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.PROCESSED);
@@ -277,6 +304,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
         assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.SKIPPED_ALREADY_PROCESSED);
         assertThat(result.isSkipped()).isTrue();
         assertThat(result.classification()).isNull();
+        assertThat(result.checklistIfEvaluated()).isEmpty();
         assertThat(result.textContents()).isEmpty();
         assertThat(statusHistoryRepository.all()).hasSize(2);
         assertThat(extractor.calls()).hasSize(1);
@@ -330,6 +358,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
 
         assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.FAILED);
         assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW);
+        assertThat(checklistItemRepository.all()).isEmpty();
         assertThat(extractor.calls()).isEmpty();
     }
 

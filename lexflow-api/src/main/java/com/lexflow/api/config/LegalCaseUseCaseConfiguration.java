@@ -1,5 +1,9 @@
 package com.lexflow.api.config;
 
+import com.lexflow.application.checklist.ChecklistRuleRepository;
+import com.lexflow.application.checklist.DocumentChecklistItemRepository;
+import com.lexflow.application.checklist.DocumentChecklistService;
+import com.lexflow.application.checklist.ManageChecklistRulesService;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.document.DocumentTextContentRepository;
@@ -81,7 +85,28 @@ public class LegalCaseUseCaseConfiguration {
                 documentRepository, textContentRepository, documentStorage, textExtractor, clock, UUID::randomUUID);
     }
 
-    /** Caso de uso disparado pelo consumo da fila (Prompts 07 e 08). */
+    /** Checklist documental determinístico (Prompt 09). */
+    @Bean
+    public DocumentChecklistService documentChecklistService(
+            LegalCaseRepository legalCaseRepository,
+            DocumentRepository documentRepository,
+            ChecklistRuleRepository ruleRepository,
+            DocumentChecklistItemRepository itemRepository,
+            Clock clock) {
+        return new DocumentChecklistService(
+                legalCaseRepository, documentRepository, ruleRepository, itemRepository, clock, UUID::randomUUID);
+    }
+
+    /** Administração das regras de checklist (Prompt 09). */
+    @Bean
+    public ManageChecklistRulesService manageChecklistRulesService(
+            ChecklistRuleRepository ruleRepository,
+            DocumentChecklistItemRepository itemRepository,
+            TransactionRunner transactionRunner) {
+        return new ManageChecklistRulesService(ruleRepository, itemRepository, transactionRunner, UUID::randomUUID);
+    }
+
+    /** Caso de uso disparado pelo consumo da fila (Prompts 07, 08 e 09). */
     @Bean
     public ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService(
             LegalCaseRepository legalCaseRepository,
@@ -89,6 +114,7 @@ public class LegalCaseUseCaseConfiguration {
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseKeywordClassifier classifier,
+            DocumentChecklistService checklistService,
             ExtractDocumentTextService extractDocumentTextService,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
@@ -98,6 +124,7 @@ public class LegalCaseUseCaseConfiguration {
                 statusHistoryRepository,
                 statusTransitionService,
                 classifier,
+                checklistService,
                 extractDocumentTextService,
                 processingEventStore,
                 transactionRunner);

@@ -142,11 +142,13 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
                 "legal-cases/%s/minuta-contrato.pdf".formatted(legalCase.id()),
                 "application/pdf",
                 Sha256Checksum.of("a".repeat(64)),
-                NOW);
+                NOW,
+                "EXECUTED_CONTRACT_COPY");
+        // Código fora do seed (V5), para não colidir com o índice único de (case_type, required_document_type).
         ChecklistRule rule = new ChecklistRule(
                 UUID.randomUUID(),
                 LegalCaseType.CONTRACT_SIGNING,
-                "CONTRACT_DRAFT",
+                "EXECUTED_CONTRACT_COPY",
                 "Minuta do contrato assinada pelas partes",
                 true);
         DocumentChecklistItem item = DocumentChecklistItem.pending(UUID.randomUUID(), legalCase.id(), rule.id())

@@ -1,5 +1,6 @@
 package com.lexflow.api.legalcase;
 
+import com.lexflow.application.checklist.DocumentChecklistService;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.legalcase.FindLegalCaseService;
 import com.lexflow.application.legalcase.ReceiveLegalCaseCommand;
@@ -10,6 +11,7 @@ import com.lexflow.domain.legalcase.LegalCaseType;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -47,11 +49,15 @@ public class LegalCaseController {
 
     private final ReceiveLegalCaseService receiveLegalCaseService;
     private final FindLegalCaseService findLegalCaseService;
+    private final DocumentChecklistService checklistService;
 
     public LegalCaseController(
-            ReceiveLegalCaseService receiveLegalCaseService, FindLegalCaseService findLegalCaseService) {
+            ReceiveLegalCaseService receiveLegalCaseService,
+            FindLegalCaseService findLegalCaseService,
+            DocumentChecklistService checklistService) {
         this.receiveLegalCaseService = receiveLegalCaseService;
         this.findLegalCaseService = findLegalCaseService;
+        this.checklistService = checklistService;
     }
 
     /**
@@ -65,6 +71,9 @@ public class LegalCaseController {
      * @param priority opcional; ausente significa {@link CasePriority#DEFAULT}
      * @param description opcional; texto livre que ajuda a classificação do tipo (Prompt 08)
      * @param files um ou mais arquivos nos formatos aceitos
+     * @param documentTypes opcional; tipo de cada arquivo para o checklist (ex.: {@code CONTRACT_DRAFT}),
+     *     na mesma ordem de {@code files}. Quando enviado, precisa ter um valor por arquivo; um valor em
+     *     branco significa "sem tipo"
      */
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<CreateLegalCaseResponse> create(
@@ -74,6 +83,7 @@ public class LegalCaseController {
             @RequestParam(value = "externalReference", required = false) String externalReference,
             @RequestParam(value = "description", required = false) String description,
             @RequestParam("files") List<MultipartFile> files,
+            @RequestParam(value = "documentTypes", required = false) List<String> documentTypes,
             @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
 
         ReceiveLegalCaseCommand command = new ReceiveLegalCaseCommand(
@@ -82,7 +92,7 @@ public class LegalCaseController {
                 requester,
                 description,
                 priority == null || priority.isBlank() ? null : CasePriority.of(priority),
-                toUploads(files),
+                toUploads(files, documentTypes),
                 idempotencyKey);
 
         ReceiveLegalCaseResult result = receiveLegalCaseService.receive(command);
@@ -102,19 +112,38 @@ public class LegalCaseController {
     }
 
     /**
+     * Checklist documental da demanda e a resposta determinística a
+     * {@code HAS_SUFFICIENT_DOCUMENTATION} (Prompt 09).
+     */
+    @GetMapping(path = "/{id}/checklist", produces = MediaType.APPLICATION_JSON_VALUE)
+    public LegalCaseChecklistResponse findChecklist(@PathVariable("id") UUID id) {
+        return LegalCaseChecklistResponse.from(checklistService.findByLegalCaseId(id));
+    }
+
+    /**
      * Converte os arquivos do multipart em uploads independentes do Spring.
      *
      * <p>O nome original passa por {@link MultipartFile#getOriginalFilename()} e é tratado como dado
      * não confiável pelas camadas de dentro: é ele que decide o formato aceito, mas não compõe o
      * caminho no storage.
      */
-    private List<DocumentUpload> toUploads(List<MultipartFile> files) {
+    private List<DocumentUpload> toUploads(List<MultipartFile> files, List<String> documentTypes) {
         if (files == null || files.isEmpty()) {
             throw new IllegalArgumentException("é obrigatório enviar ao menos um arquivo em 'files'");
         }
-        return files.stream()
-                .map(file -> new DocumentUpload(file.getOriginalFilename(), file.getContentType(), readBytes(file)))
-                .toList();
+        if (documentTypes != null && !documentTypes.isEmpty() && documentTypes.size() != files.size()) {
+            throw new IllegalArgumentException(
+                    "'documentTypes' deve ter um valor para cada arquivo: %d arquivo(s) e %d tipo(s)"
+                            .formatted(files.size(), documentTypes.size()));
+        }
+        List<DocumentUpload> uploads = new ArrayList<>(files.size());
+        for (int index = 0; index < files.size(); index++) {
+            MultipartFile file = files.get(index);
+            String documentType = documentTypes == null || documentTypes.isEmpty() ? null : documentTypes.get(index);
+            uploads.add(new DocumentUpload(
+                    file.getOriginalFilename(), file.getContentType(), readBytes(file), documentType));
+        }
+        return uploads;
     }
 
     private byte[] readBytes(MultipartFile file) {

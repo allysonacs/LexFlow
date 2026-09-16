@@ -11,6 +11,8 @@ dependencies {
     implementation(platform(libs.spring.boot.bom))
     implementation(libs.spring.boot.starter.web)
     implementation(libs.spring.boot.starter.actuator)
+    // Protege a API administrativa (Prompt 09); os demais endpoints seguem abertos até o prompt de segurança.
+    implementation(libs.spring.boot.starter.security)
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(testFixtures(project(":lexflow-infrastructure")))

@@ -28,7 +28,7 @@ public class DocumentRepositoryAdapter implements DocumentRepository {
 
     @Override
     public List<Document> findByLegalCaseId(UUID legalCaseId) {
-        return jpaRepository.findByLegalCaseId(legalCaseId).stream()
+        return jpaRepository.findByLegalCaseIdOrderByUploadedAtAscFileNameAscIdAsc(legalCaseId).stream()
                 .map(DocumentMapper::toDomain)
                 .toList();
     }

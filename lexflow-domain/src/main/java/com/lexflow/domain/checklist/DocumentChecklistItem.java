@@ -32,6 +32,14 @@ public record DocumentChecklistItem(
         return new DocumentChecklistItem(id, legalCaseId, checklistRuleId, ChecklistItemStatus.PENDING, null, null);
     }
 
+    /**
+     * Cria o item já avaliado como faltante — é assim que os itens nascem quando a demanda é
+     * classificada (Prompt 09): até que um documento do tipo exigido seja vinculado, ele falta.
+     */
+    public static DocumentChecklistItem missing(UUID id, UUID legalCaseId, UUID checklistRuleId, Instant evaluatedAt) {
+        return pending(id, legalCaseId, checklistRuleId).markMissing(evaluatedAt);
+    }
+
     /** Vincula o documento que atende à regra, marcando o item como satisfeito. */
     public DocumentChecklistItem satisfyWith(UUID documentId, Instant evaluatedAt) {
         Objects.requireNonNull(documentId, "documentId não pode ser nulo");

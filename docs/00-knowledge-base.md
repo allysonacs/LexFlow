@@ -79,7 +79,7 @@ Responsável por cada transição:
 | Transição | Quem executa |
 |---|---|
 | criação em `RECEIVED` | ingestão (`POST /api/v1/legal-cases`, Prompt 05) |
-| `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação, com a classificação (Prompts 07 e 08) |
+| `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação da classificação e da geração do checklist (Prompts 07, 08 e 09) |
 | `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11). Até lá, a demanda permanece em `EXTRACTING` com o texto dos documentos já extraído |
 | `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` e seguintes | cadeia de IA e revisão humana (Prompts 13 e 15) |
 
@@ -144,9 +144,10 @@ legal_case_status_history (
 
 documents (
   id, legal_case_id, file_name, storage_path, mime_type,
-  checksum_sha256, uploaded_at
+  checksum_sha256, uploaded_at, document_type
 )
 -- único por (legal_case_id, checksum_sha256): o mesmo arquivo não é anexado duas vezes à mesma demanda
+-- document_type: código opcional informado no upload (ex.: CONTRACT_DRAFT); vincula o documento ao checklist
 
 document_text_contents (
   id, document_id (unique), legal_case_id, content, extraction_method,
@@ -159,11 +160,13 @@ document_text_contents (
 checklist_rules (
   id, case_type, required_document_type, description, mandatory
 )
+-- único por (case_type, required_document_type); required_document_type em UPPER_SNAKE_CASE
 
 document_checklist_items (
   id, legal_case_id, checklist_rule_id, status, document_id, evaluated_at
 )
 -- status: PENDING | SATISFIED | MISSING
+-- único por (legal_case_id, checklist_rule_id); document_id preenchido se, e somente se, status = SATISFIED
 
 ai_extracted_facts (
   id, legal_case_id, document_id, extracted_json, model_version, extracted_at
@@ -210,6 +213,8 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V1__init_schema.sql` | as 13 tabelas originais desta seção, a extensão `vector` e os índices |
 | `V2__add_legal_case_description.sql` | coluna `legal_cases.description` (Prompt 08) |
 | `V3__create_document_text_contents.sql` | tabela `document_text_contents`, com as restrições de consistência (Prompt 08) |
+| `V4__checklist_constraints_and_document_type.sql` | coluna `documents.document_type`, índices únicos de regras e de itens e restrições dos itens (Prompt 09) |
+| `V5__seed_checklist_rules.sql` | regras iniciais do checklist, com identificadores fixos (Prompt 09) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -256,6 +261,29 @@ Regra: `domain` não depende de nenhum framework. `application` depende só de `
 - Um item fica `MISSING` até que um documento do tipo exigido seja vinculado; então passa a `SATISFIED`.
 - `HAS_SUFFICIENT_DOCUMENTATION` só pode ser respondida como suficiente se **todos** os itens obrigatórios (`mandatory = true`) estiverem `SATISFIED`.
 - Regras devem ser avaliadas de forma **determinística e testável isoladamente**, sem chamar o LLM.
+
+Detalhamento (Prompt 09):
+
+- **Tipo de documento.** É um código em `UPPER_SNAKE_CASE` (`DocumentTypeCode`), com até 100 caracteres. O requisitante informa o tipo de cada arquivo no upload, e a regra informa o tipo exigido; o vínculo é por igualdade exata, depois da normalização para maiúsculas. Um documento sem tipo não satisfaz regra nenhuma.
+- **Geração.** Os itens são gerados na classificação, na mesma transação da transição `CLASSIFYING → EXTRACTING`, e nascem `MISSING`. Novas sincronizações não duplicam itens e criam itens para regras adicionadas depois. `PENDING` só existe para itens criados sem avaliação.
+- **Vínculo.** Havendo mais de um documento do tipo exigido, vale o primeiro, na ordem de envio, com desempate por nome e identificador. Se o documento deixar de existir, o item volta a `MISSING`.
+- **Suficiência.** Um checklist sem itens é suficiente, porque o tipo não exige nada. A consulta, porém, só responde "suficiente" depois que a demanda passou pela classificação (`evaluated`); antes disso, a resposta é sempre negativa. O status posterior da demanda não altera a resposta.
+- **Etapas com IA.** A IA pode apontar insuficiência de conteúdo em um documento presente, mas nunca transformar em suficiente uma documentação a que falte um item obrigatório.
+- **Seed inicial:**
+
+  | Tipo de demanda | Obrigatórios | Opcional |
+  |---|---|---|
+  | `SUPPLIER_HIRING` | `SUPPLIER_CNPJ_CARD`, `SUPPLIER_QUALIFICATION_DOCUMENTS` | `COMMERCIAL_PROPOSAL` |
+  | `CONTRACT_SIGNING` | `CONTRACT_DRAFT`, `FINANCIAL_OPINION` | `SIGNATORY_POWERS` |
+  | `SETTLEMENT_PAYMENT` | `SETTLEMENT_AGREEMENT`, `PAYMENT_INSTRUCTIONS` | `COURT_APPROVAL` |
+  | `LAWSUIT_CLOSURE` | `CLOSURE_PETITION`, `CASE_PROGRESS_REPORT` | `FINAL_JUDGMENT` |
+  | `PROPOSAL_ACCEPTANCE` | `PROPOSAL_DOCUMENT`, `FINANCIAL_OPINION` | `COUNTERPARTY_REGISTRATION` |
+
+- **Manutenção.** As regras são mantidas pela API administrativa (`/api/v1/admin/checklist-rules`, papel `ADMIN`).
+  - O tipo de demanda de uma regra não muda.
+  - Não há duas regras iguais no mesmo tipo.
+  - Uma regra já usada por alguma demanda não pode ser excluída nem trocar o documento exigido; para deixar de exigi-lo, a regra é marcada como não obrigatória.
+  - Descrição e obrigatoriedade podem mudar a qualquer momento.
 
 ---
 
@@ -320,6 +348,9 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 ## 12. Segurança e LGPD
 
 - Dados de demandas jurídicas são sensíveis — controle de acesso por papel (ex.: `ANALYST`, `LEGAL_REVIEWER`, `ADMIN`).
+  - **Estado atual (Prompt 09):** só `/api/v1/admin/**` é protegido, por HTTP Basic, com o papel `ADMIN`, sem sessão e sem CSRF.
+  - As credenciais vêm de `LEXFLOW_ADMIN_USERNAME` e `LEXFLOW_ADMIN_PASSWORD`; a senha pode ser informada em texto, e aí vira hash na inicialização, ou já como `{bcrypt}`. Em produção, as duas variáveis são obrigatórias.
+  - As demais rotas seguem abertas até a escolha do provedor de identidade.
 - Nunca logar conteúdo integral de documentos, apenas metadados e hashes.
   - O `toString` de `DocumentTextContent` e de `ExtractedText` mostra só o tamanho do texto.
   - O motivo da classificação gravado no histórico traz apenas tipos e palavras-chave da tabela, nunca trechos do texto do requisitante.
@@ -340,7 +371,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 
 ---
 
-## 14. Decisões de implementação registradas (Prompts 01 a 08)
+## 14. Decisões de implementação registradas (Prompts 01 a 09)
 
 Esta seção consolida as decisões tomadas durante a implementação que não constavam das seções anteriores. Qualquer mudança deve ser registrada aqui antes de ser implementada.
 
@@ -359,17 +390,19 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - A porta `TransactionRunner` permite que os casos de uso delimitem transações sem depender do Spring.
 
 **Ingestão (Prompt 05)**
-- `POST /api/v1/legal-cases` (multipart) recebe `caseType`, `requester`, `priority`, `externalReference` e `description`, os três últimos opcionais, além de um ou mais arquivos em `files`. Responde `201` com `id`, `statusUrl` e o cabeçalho `Location`.
+- `POST /api/v1/legal-cases` (multipart) recebe `caseType`, `requester`, `priority`, `externalReference` e `description`, os três últimos opcionais, além de um ou mais arquivos em `files` e, opcionalmente, `documentTypes` com um tipo por arquivo, na mesma ordem (Prompt 09). Responde `201` com `id`, `statusUrl` e o cabeçalho `Location`.
 - `GET /api/v1/legal-cases/{id}` devolve o status, os metadados e os arquivos da demanda, sem expor o caminho no storage.
 - A ingestão não classifica, não extrai e não chama IA. Ela grava tudo em uma transação e só depois publica o evento.
 - Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`):
 
   | Situação | HTTP |
   |---|---|
-  | `DomainException` e entrada inválida | `400` |
-  | demanda inexistente | `404` |
+  | `DomainException` e entrada inválida (inclusive JSON malformado) | `400` |
+  | credenciais ausentes ou inválidas | `401` |
+  | usuário sem o papel exigido | `403` |
+  | demanda ou regra de checklist inexistente | `404` |
   | tamanho de upload excedido | `413` |
-  | conflito de idempotência ou de transição | `409` |
+  | conflito de idempotência, de transição, regra duplicada ou regra em uso | `409` |
   | falha do storage | `503` |
   | demais erros (mensagem genérica) | `500` |
 
@@ -403,3 +436,12 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - O texto é saneado antes de ser gravado: remove-se o caractere nulo, que o PostgreSQL recusa, e as bordas em branco.
 - Configuração em `lexflow.extraction.*`: `ocr-language`, `tesseract-path`, `ocr-timeout` (padrão 2 min por imagem ou página), `ocr-dpi` e `min-native-characters-per-page`. Um `tesseract-path` inexistente impede a aplicação de subir. Um Tesseract ausente só gera um aviso na inicialização e faz falhar os documentos que precisam de OCR.
 - A demanda termina esta etapa em `EXTRACTING`, e o texto gravado é a entrada do Prompt 11.
+
+**Checklist documental (Prompt 09)**
+- As regras de negócio estão na seção 9, e o modelo de dados, na seção 6.
+- O CRUD administrativo usa REST com Spring Security (HTTP Basic), e não apenas o seed: assim a área jurídica ajusta as regras sem deploy.
+- Endpoints novos:
+  - `GET /api/v1/legal-cases/{id}/checklist`: itens, documentos obrigatórios faltantes, `evaluated` e `hasSufficientDocumentation`;
+  - `GET/POST /api/v1/admin/checklist-rules` e `GET/PUT/DELETE /api/v1/admin/checklist-rules/{id}`.
+- Listagens são paginadas com `page` (a partir de 0) e `size` (padrão 20, máximo 100). A resposta traz `content`, `page`, `size`, `totalElements` e `totalPages`.
+- Os documentos de uma demanda são lidos em ordem estável (data de envio, nome, identificador), porque a ordem decide qual documento satisfaz um item.

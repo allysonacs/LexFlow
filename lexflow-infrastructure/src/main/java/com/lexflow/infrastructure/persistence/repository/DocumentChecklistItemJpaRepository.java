@@ -9,4 +9,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface DocumentChecklistItemJpaRepository extends JpaRepository<DocumentChecklistItemEntity, UUID> {
 
     List<DocumentChecklistItemEntity> findByLegalCaseId(UUID legalCaseId);
+
+    boolean existsByChecklistRuleId(UUID checklistRuleId);
 }
