@@ -31,4 +31,33 @@ subprojects {
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
     }
+
+    // A seção 13 da base de conhecimento exige 80% de cobertura em domain e application.
+    // Nos demais módulos a garantia vem dos testes de integração, não de um percentual.
+    if (name in listOf("lexflow-domain", "lexflow-application")) {
+        apply(plugin = "jacoco")
+
+        tasks.named<JacocoReport>("jacocoTestReport") {
+            dependsOn(tasks.named("test"))
+            reports {
+                xml.required = true
+                html.required = true
+            }
+        }
+
+        tasks.named<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
+            violationRules {
+                rule {
+                    limit {
+                        counter = "LINE"
+                        minimum = "0.80".toBigDecimal()
+                    }
+                }
+            }
+        }
+
+        tasks.named("check") {
+            dependsOn("jacocoTestReport", "jacocoTestCoverageVerification")
+        }
+    }
 }

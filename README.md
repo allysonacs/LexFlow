@@ -49,8 +49,16 @@ Java puro, sem uma única dependência. As entidades são `record` imutáveis: u
 
 Duas regras que o domínio faz cumprir sozinho, sem depender de nenhuma camada externa:
 
-- **Máquina de estados.** As transições permitidas ficam isoladas em `LegalCaseStatusTransitionRules`, transcritas da seção 4 da base de conhecimento. Qualquer outra transição lança `InvalidStatusTransitionException`. O teste cobre a matriz completa dos 81 pares de status.
+- **Máquina de estados.** As transições permitidas ficam isoladas em `LegalCaseStatusTransitionRules`, transcritas da seção 4 da base de conhecimento. Qualquer outra transição lança `InvalidStatusTransitionException`. O teste cobre a matriz completa dos 81 pares de status, tanto nas regras do domínio quanto no serviço de aplicação que as usa.
 - **Resposta da IA sem fonte é recusada.** O construtor de `AiAnalysisResponse` rejeita uma resposta sem `citedChunks`, a não ser que o texto declare que a informação não está na base normativa. Uma alucinação sem fonte não consegue nem ser instanciada.
+
+### Aplicação (`lexflow-application`)
+
+Casos de uso e portas. Também sem framework: depende apenas do domínio.
+
+- **`LegalCaseStatusTransitionService`** é o **ponto único de mudança de status** do sistema. Nenhum outro componente — controller, consumer de fila, job ou repositório — pode alterar o `LegalCaseStatus` diretamente. O serviço valida a transição pelas regras do domínio e devolve, na mesma operação, a demanda já no novo status e o `LegalCaseStatusHistoryEntry` correspondente. Os dois andam juntos justamente para que nenhuma demanda mude de status sem deixar rastro no histórico.
+- O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, entra junto com os casos de uso que persistem a demanda.
+- O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
 
 ### Persistência (`lexflow-infrastructure`)
 
@@ -85,7 +93,8 @@ Para encerrar o banco local: `docker compose stop` (ou `docker compose down -v`,
 
 ```bash
 ./gradlew test                          # todos os módulos
-./gradlew :lexflow-domain:test          # só testes unitários, não precisam de Docker
+./gradlew :lexflow-domain:test          # testes unitários, não precisam de Docker
+./gradlew :lexflow-application:test     # testes unitários, não precisam de Docker
 ./gradlew :lexflow-infrastructure:test  # testes de integração, precisam de Docker
 ```
 
@@ -101,7 +110,7 @@ class MeuTesteDeIntegracao { }
 
 ### Cobertura
 
-O módulo `lexflow-domain` exige no mínimo 80% de cobertura de linha, conforme a seção 13 da base de conhecimento. A verificação roda dentro do `./gradlew build` e quebra o build se a cobertura cair. O relatório em HTML fica em `lexflow-domain/build/reports/jacoco/test/html/index.html`.
+Os módulos `lexflow-domain` e `lexflow-application` exigem no mínimo 80% de cobertura de linha, conforme a seção 13 da base de conhecimento. A regra é configurada uma única vez, no `build.gradle.kts` da raiz. A verificação roda dentro do `./gradlew build` e quebra o build se a cobertura cair. Os relatórios em HTML ficam em `<módulo>/build/reports/jacoco/test/html/index.html`.
 
 ## Perfis e variáveis de ambiente
 
