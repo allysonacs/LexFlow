@@ -17,4 +17,7 @@ dependencies {
     // Os testes de integração conferem no banco o que a API gravou; em produção o módulo continua
     // sem enxergar JPA, que chega apenas em tempo de execução, por lexflow-infrastructure.
     testImplementation(libs.spring.boot.starter.data.jpa)
+    // Os testes de fila esperam um efeito assíncrono; sem isso restaria dormir por um tempo fixo.
+    testImplementation(libs.awaitility)
+    testImplementation(libs.spring.boot.starter.amqp)
 }

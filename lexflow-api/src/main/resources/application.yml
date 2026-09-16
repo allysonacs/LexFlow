@@ -17,6 +17,36 @@ spring:
       # O schema é do Flyway; o Hibernate apenas confere se as entidades batem com ele.
       ddl-auto: validate
     open-in-view: false
+  rabbitmq:
+    host: ${LEXFLOW_RABBITMQ_HOST:localhost}
+    port: ${LEXFLOW_RABBITMQ_PORT:5672}
+    username: ${LEXFLOW_RABBITMQ_USERNAME:lexflow}
+    password: ${LEXFLOW_RABBITMQ_PASSWORD:lexflow}
+    virtual-host: ${LEXFLOW_RABBITMQ_VHOST:/}
+    listener:
+      simple:
+        # Uma demanda por vez em cada thread do consumidor; o paralelismo vem de mais réplicas.
+        concurrency: ${LEXFLOW_RABBITMQ_CONCURRENCY:2}
+        max-concurrency: ${LEXFLOW_RABBITMQ_MAX_CONCURRENCY:8}
+        prefetch: 1
+        # Mensagem rejeitada não volta para a fila: vai para a dead-letter, como manda o Prompt 07.
+        # Sem isso, uma falha permanente entraria em laço infinito de reentrega.
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-attempts: ${LEXFLOW_RABBITMQ_MAX_ATTEMPTS:4}
+          initial-interval: 1s
+          multiplier: 2
+          max-interval: 10s
+    template:
+      retry:
+        # Backoff também na publicação: um broker momentaneamente indisponível não pode
+        # derrubar a ingestão (seção 11).
+        enabled: true
+        max-attempts: 3
+        initial-interval: 500ms
+        multiplier: 2
+
   servlet:
     multipart:
       # Limites da ingestão de documentos (Prompt 05). Acima disso a API responde 413.

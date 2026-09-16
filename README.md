@@ -13,6 +13,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - Gradle 9 (Kotlin DSL), multi-módulo, com o wrapper versionado
 - PostgreSQL 17 + pgvector, com migrations em Flyway
 - MinIO (compatível com S3) para os documentos, via AWS SDK v2
+- RabbitMQ para o processamento assíncrono, via Spring AMQP
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -61,7 +62,8 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, entra junto com os casos de uso que persistem a demanda.
 - O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
 - **`ReceiveLegalCaseService`** é o caso de uso de ingestão: valida os arquivos, trata a idempotência, grava demanda, histórico e metadados em uma transação só e publica o evento de recebimento. **`FindLegalCaseService`** responde à consulta de status.
-- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `LegalCaseIngestionIdempotencyStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
+- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, avança a demanda de `RECEIVED` para `CLASSIFYING` e registra o desfecho. Ele devolve um `LegalCaseProcessingOutcome` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
@@ -117,12 +119,32 @@ Nenhum log registra o conteúdo do arquivo — apenas nome, tamanho e checksum. 
 | `path-style-access` | `true` para o MinIO, que endereça o bucket no caminho da URL |
 | `create-bucket-if-missing` | Cria o bucket na primeira gravação; conveniência de desenvolvimento, desligada em produção |
 
+### Processamento assíncrono (`lexflow-infrastructure`)
+
+A ingestão publica `LegalCaseReceivedEvent` e responde; o processamento acontece depois, em outro processo.
+
+```
+lexflow.events (topic) --[legal-case.received]--> lexflow.legal-case-received
+                                                        |
+                                     esgotadas as tentativas (x-dead-letter-exchange)
+                                                        v
+lexflow.events.dlx (topic) --[legal-case.received]--> lexflow.legal-case-received.dlq
+```
+
+**Por que RabbitMQ e não Kafka.** Para milhares de eventos por dia — poucos por minuto — os dois dão conta, então o desempate foi simplicidade operacional: a dead-letter é um argumento de fila (`x-dead-letter-exchange`) em vez de um tópico extra com error handler na aplicação; o paralelismo vem de mais réplicas, não de um número de partições decidido cedo demais; e é um broker, não um cluster com coordenação, retenção e offsets — sem nenhuma necessidade de reprocessar o histórico, que é o que justificaria o log durável do Kafka. A justificativa completa está no Javadoc de `RabbitMqConfiguration`. Se o requisito passar a incluir replay de meses de eventos, a vantagem se inverte, e a troca fica contida naquela classe e nos dois adapters ao lado.
+
+**Idempotência.** Antes de processar, o consumidor reserva a `idempotencyKey` em `processing_events`. Um evento já concluído é descartado com log, e não como erro (seção 11); um que falhou antes é retomado na entrega seguinte; um que está em andamento em outra réplica é descartado. A garantia é do índice único no banco, não de uma consulta prévia.
+
+**Falha e retry.** A exceção sobe do consumidor de propósito: é ela que aciona o retry com backoff exponencial (1s → 10s, 4 tentativas) e, esgotadas as tentativas, faz o broker mandar a mensagem para a dead-letter. Capturar a exceção no listener daria um "sucesso" falso e perderia a mensagem em silêncio. A transição e a marca de "processado" ficam na mesma transação; a marca de falha fica fora dela, porque um rollback apagaria o próprio registro da falha.
+
+> **Limitação conhecida.** A chave de idempotência protege contra a entrega repetida do *mesmo* evento. Dois eventos *diferentes* para a mesma demanda, processados em paralelo, ainda podem ambos validar a transição em memória e gravar — não há bloqueio otimista em `legal_cases`. O fluxo atual publica exatamente um evento por demanda, então isso não é alcançável hoje; travar essa porta com uma coluna de versão é trabalho para o Prompt 17.
+
 ## Como executar
 
 Pré-requisitos: um JDK instalado para rodar o Gradle e o Docker em execução. Se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente.
 
 ```bash
-# Sobe o PostgreSQL com pgvector e o MinIO (com o bucket já criado)
+# Sobe o PostgreSQL com pgvector, o MinIO (com o bucket já criado) e o RabbitMQ
 docker compose up -d
 
 # Compila todos os módulos, roda os testes e verifica a cobertura
@@ -135,7 +157,7 @@ docker compose up -d
 curl http://localhost:8080/actuator/health
 ```
 
-Para encerrar os serviços locais: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados). O console do MinIO fica em `http://localhost:9001` (usuário `lexflow`, senha `lexflow123`).
+Para encerrar os serviços locais: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados). O console do MinIO fica em `http://localhost:9001` (usuário `lexflow`, senha `lexflow123`) e o do RabbitMQ em `http://localhost:15672` (usuário e senha `lexflow`).
 
 ## Testes
 
@@ -147,7 +169,7 @@ Para encerrar os serviços locais: `docker compose stop` (ou `docker compose dow
 ./gradlew :lexflow-api:test             # testes de integração da API, precisam de Docker
 ```
 
-Os testes de integração sobem um PostgreSQL com pgvector e um MinIO via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
+Os testes de integração sobem um PostgreSQL com pgvector, um MinIO e um RabbitMQ via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
 
 O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
 
@@ -155,9 +177,15 @@ O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `Postgre
 
 ```java
 @SpringBootTest
-@Import({PostgresTestcontainersConfiguration.class, MinioTestcontainersConfiguration.class})
+@Import({
+    PostgresTestcontainersConfiguration.class,
+    MinioTestcontainersConfiguration.class,
+    RabbitMqTestcontainersConfiguration.class
+})
 class MeuTesteDeIntegracao { }
 ```
+
+Nos testes o consumidor da fila sobe **parado**, e cada teste o inicia quando o cenário está montado. Sem isso, o consumo em segundo plano correria contra as asserções de qualquer teste que crie uma demanda, e o status observado dependeria de quem chegasse primeiro ao banco.
 
 > As imagens do MinIO vêm do `quay.io`, e não do Docker Hub: o repositório `minio/minio` do Hub deixou de ser público.
 
@@ -188,6 +216,11 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_STORAGE_ACCESS_KEY` | Credencial do storage; em branco usa a cadeia padrão do SDK |
 | `LEXFLOW_STORAGE_SECRET_KEY` | Credencial do storage; em branco usa a cadeia padrão do SDK |
 | `LEXFLOW_STORAGE_PATH_STYLE` | `true` para MinIO (padrão `false`) |
+| `LEXFLOW_RABBITMQ_HOST` / `_PORT` | Endereço do broker (padrão `localhost:5672`) |
+| `LEXFLOW_RABBITMQ_USERNAME` / `_PASSWORD` | Credenciais do broker |
+| `LEXFLOW_RABBITMQ_VHOST` | Virtual host (padrão `/`) |
+| `LEXFLOW_RABBITMQ_CONCURRENCY` / `_MAX_CONCURRENCY` | Consumidores por réplica (padrão `2`–`8`) |
+| `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `4`) |
 
 ## Convenções
 

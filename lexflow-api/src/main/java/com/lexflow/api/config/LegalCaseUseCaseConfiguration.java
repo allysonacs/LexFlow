@@ -1,6 +1,7 @@
 package com.lexflow.api.config;
 
 import com.lexflow.application.document.DocumentRepository;
+import com.lexflow.application.event.ProcessingEventStore;
 import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.legalcase.FindLegalCaseService;
 import com.lexflow.application.legalcase.LegalCaseIngestionIdempotencyStore;
@@ -8,6 +9,7 @@ import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
 import com.lexflow.application.legalcase.LegalCaseRepository;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryRepository;
 import com.lexflow.application.legalcase.LegalCaseStatusTransitionService;
+import com.lexflow.application.legalcase.ProcessLegalCaseReceivedEventService;
 import com.lexflow.application.legalcase.ReceiveLegalCaseService;
 import com.lexflow.application.transaction.TransactionRunner;
 import com.lexflow.domain.legalcase.LegalCaseStatusTransitionRules;
@@ -55,6 +57,22 @@ public class LegalCaseUseCaseConfiguration {
                 transactionRunner,
                 clock,
                 UUID::randomUUID);
+    }
+
+    /** Caso de uso disparado pelo consumo da fila (Prompt 07). */
+    @Bean
+    public ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService(
+            LegalCaseRepository legalCaseRepository,
+            LegalCaseStatusHistoryRepository statusHistoryRepository,
+            LegalCaseStatusTransitionService statusTransitionService,
+            ProcessingEventStore processingEventStore,
+            TransactionRunner transactionRunner) {
+        return new ProcessLegalCaseReceivedEventService(
+                legalCaseRepository,
+                statusHistoryRepository,
+                statusTransitionService,
+                processingEventStore,
+                transactionRunner);
     }
 
     @Bean

@@ -54,6 +54,26 @@ services:
       echo 'bucket lexflow-documents pronto'
       "
 
+  rabbitmq:
+    # Broker das mensagens assíncronas. A justificativa da escolha está no Javadoc de
+    # RabbitMqConfiguration.
+    image: rabbitmq:4.1-management-alpine
+    container_name: lexflow-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: lexflow
+      RABBITMQ_DEFAULT_PASS: lexflow
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Console de administração
+    volumes:
+      - lexflow-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
 volumes:
   lexflow-postgres-data:
+  lexflow-rabbitmq-data:
   lexflow-minio-data:

@@ -80,6 +80,26 @@ public class ProcessingEventEntity {
         this.processedAt = processedAt;
     }
 
+    /**
+     * Retoma um evento que falhou, devolvendo-o ao estado de processamento.
+     *
+     * <p>Limpa {@code processedAt} para que o horário de uma tentativa anterior não seja confundido
+     * com o desfecho desta.
+     */
+    public void markInProgress() {
+        this.status = ProcessingEventStatus.IN_PROGRESS;
+        this.processedAt = null;
+    }
+
+    /**
+     * Registra uma falha de processamento. O evento continua elegível para uma nova tentativa: quem
+     * decide desistir é a política de retry do consumidor, não esta linha.
+     */
+    public void markFailed() {
+        this.status = ProcessingEventStatus.FAILED;
+        this.processedAt = null;
+    }
+
     public UUID getId() {
         return id;
     }
