@@ -22,6 +22,7 @@ public final class LegalCaseMapper {
                 legalCase.caseType(),
                 legalCase.status(),
                 legalCase.requester(),
+                legalCase.description(),
                 legalCase.priority(),
                 legalCase.createdAt(),
                 legalCase.updatedAt());
@@ -34,6 +35,7 @@ public final class LegalCaseMapper {
                 entity.getCaseType(),
                 entity.getStatus(),
                 entity.getRequester(),
+                entity.getDescription(),
                 entity.getPriority(),
                 entity.getCreatedAt(),
                 entity.getUpdatedAt());

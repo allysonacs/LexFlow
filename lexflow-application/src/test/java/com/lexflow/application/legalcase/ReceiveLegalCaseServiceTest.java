@@ -78,6 +78,7 @@ class ReceiveLegalCaseServiceTest {
                 "REF-2026-001",
                 LegalCaseType.CONTRACT_SIGNING,
                 REQUESTER,
+                "Minuta de contrato de licenciamento",
                 CasePriority.HIGH,
                 List.of(uploads),
                 idempotencyKey);
@@ -91,6 +92,7 @@ class ReceiveLegalCaseServiceTest {
         assertThat(result.replayed()).isFalse();
         assertThat(result.legalCase().legalCase().status()).isEqualTo(LegalCaseStatus.RECEIVED);
         assertThat(result.legalCase().legalCase().caseType()).isEqualTo(LegalCaseType.CONTRACT_SIGNING);
+        assertThat(result.legalCase().legalCase().description()).isEqualTo("Minuta de contrato de licenciamento");
         assertThat(result.legalCase().legalCase().priority()).isEqualTo(CasePriority.HIGH);
         assertThat(result.legalCase().legalCase().createdAt()).isEqualTo(NOW);
         assertThat(legalCaseRepository.count()).isEqualTo(1);
@@ -213,7 +215,7 @@ class ReceiveLegalCaseServiceTest {
     void shouldRejectCommandWithoutFiles() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> new ReceiveLegalCaseCommand(
-                        null, LegalCaseType.CONTRACT_SIGNING, REQUESTER, null, List.of(), null))
+                        null, LegalCaseType.CONTRACT_SIGNING, REQUESTER, null, null, List.of(), null))
                 .withMessageContaining("ao menos um arquivo");
     }
 
@@ -221,10 +223,11 @@ class ReceiveLegalCaseServiceTest {
     @DisplayName("prioridade ausente vira o valor padrão, e não um erro")
     void shouldApplyDefaultPriority() {
         ReceiveLegalCaseCommand command = new ReceiveLegalCaseCommand(
-                "  ", LegalCaseType.SUPPLIER_HIRING, REQUESTER, null, List.of(upload("nota.png", "a")), "  ");
+                "  ", LegalCaseType.SUPPLIER_HIRING, REQUESTER, " ", null, List.of(upload("nota.png", "a")), "  ");
 
         assertThat(command.priority()).isEqualTo(CasePriority.DEFAULT);
         assertThat(command.externalReference()).isNull();
+        assertThat(command.description()).isNull();
         assertThat(command.hasIdempotencyKey()).isFalse();
     }
 }

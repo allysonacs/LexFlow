@@ -1,26 +1,50 @@
 package com.lexflow.application.legalcase;
 
+import com.lexflow.application.document.DocumentRepository;
+import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.event.ProcessingEventStore;
 import com.lexflow.application.event.ProcessingReservation;
 import com.lexflow.application.transaction.TransactionRunner;
+import com.lexflow.domain.classification.LegalCaseClassification;
+import com.lexflow.domain.classification.LegalCaseKeywordClassifier;
+import com.lexflow.domain.document.Document;
+import com.lexflow.domain.document.DocumentTextContent;
 import com.lexflow.domain.exception.LegalCaseNotFoundException;
 import com.lexflow.domain.legalcase.LegalCase;
 import com.lexflow.domain.legalcase.LegalCaseStatus;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
- * Caso de uso disparado pelo consumo de {@link LegalCaseReceivedEvent}: tira a demanda da caixa de
- * entrada e a coloca em processamento.
+ * Caso de uso disparado pelo consumo de {@link LegalCaseReceivedEvent}: leva a demanda da caixa de
+ * entrada até o texto extraído, sem nenhuma chamada a LLM.
  *
- * <p>Nesta etapa o trabalho é só avançar o status de {@link LegalCaseStatus#RECEIVED} para
- * {@link LegalCaseStatus#CLASSIFYING}. A classificação de verdade é do Prompt 08; o que já está no
- * lugar é a mecânica que ela vai usar — idempotência, transação e registro de histórico.
+ * <p>As etapas, na ordem:
+ *
+ * <ol>
+ *   <li><strong>{@code RECEIVED → CLASSIFYING}</strong>: a demanda entra em processamento;
+ *   <li><strong>classificação</strong>: o tipo informado é validado contra as palavras-chave dos
+ *       nomes de arquivo e da descrição (Prompt 08), e o resultado vai para o histórico;
+ *   <li><strong>{@code CLASSIFYING → EXTRACTING}</strong>;
+ *   <li><strong>extração de texto</strong> de cada documento, nativa ou por OCR.
+ * </ol>
+ *
+ * <p>A demanda <strong>permanece em {@code EXTRACTING}</strong> ao fim: a seção 4 só permite sair
+ * dali para {@code AI_ANALYSIS_IN_PROGRESS}, e essa transição pertence à extração de fatos (Prompt
+ * 11), que ainda compõe a mesma etapa. O texto gravado é o que ela vai consumir.
  *
  * <p><strong>A ordem das operações não é arbitrária.</strong> A reserva do evento vem antes de
- * qualquer escrita, para que uma entrega duplicada seja descartada sem efeito. A transição e a
- * marca de "processado" ficam na mesma transação, de modo que não existe estado em que a demanda
- * avançou mas o evento continua pendente — nem o contrário. E a marca de falha fica fora dela, já
- * que um rollback apagaria o próprio registro da falha e a mensagem voltaria a parecer virgem.
+ * qualquer escrita, para que uma entrega duplicada seja descartada sem efeito. As duas transições
+ * ficam em uma transação só — a classificação é instantânea, e não há por que expor um
+ * {@code CLASSIFYING} que ninguém chegaria a observar. A extração fica fora de qualquer transação,
+ * porque o OCR pode levar minutos. A marca de falha também fica fora, já que um rollback apagaria o
+ * próprio registro da falha.
+ *
+ * <p><strong>Retomada.</strong> Cada etapa olha o status atual antes de agir. Uma tentativa que
+ * falhou durante a extração volta com a demanda já em {@code EXTRACTING}: a classificação não se
+ * repete, e só os documentos ainda sem texto são lidos.
  */
 public class ProcessLegalCaseReceivedEventService {
 
@@ -29,22 +53,32 @@ public class ProcessLegalCaseReceivedEventService {
             + LegalCaseReceivedEvent.EVENT_TYPE;
 
     private final LegalCaseRepository legalCaseRepository;
+    private final DocumentRepository documentRepository;
     private final LegalCaseStatusHistoryRepository statusHistoryRepository;
     private final LegalCaseStatusTransitionService statusTransitionService;
+    private final LegalCaseKeywordClassifier classifier;
+    private final ExtractDocumentTextService extractDocumentTextService;
     private final ProcessingEventStore processingEventStore;
     private final TransactionRunner transactionRunner;
 
     public ProcessLegalCaseReceivedEventService(
             LegalCaseRepository legalCaseRepository,
+            DocumentRepository documentRepository,
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             LegalCaseStatusTransitionService statusTransitionService,
+            LegalCaseKeywordClassifier classifier,
+            ExtractDocumentTextService extractDocumentTextService,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
         this.legalCaseRepository = Objects.requireNonNull(legalCaseRepository, "legalCaseRepository não pode ser nulo");
+        this.documentRepository = Objects.requireNonNull(documentRepository, "documentRepository não pode ser nulo");
         this.statusHistoryRepository =
                 Objects.requireNonNull(statusHistoryRepository, "statusHistoryRepository não pode ser nulo");
         this.statusTransitionService =
                 Objects.requireNonNull(statusTransitionService, "statusTransitionService não pode ser nulo");
+        this.classifier = Objects.requireNonNull(classifier, "classifier não pode ser nulo");
+        this.extractDocumentTextService =
+                Objects.requireNonNull(extractDocumentTextService, "extractDocumentTextService não pode ser nulo");
         this.processingEventStore = Objects.requireNonNull(processingEventStore, "processingEventStore não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
     }
@@ -52,12 +86,16 @@ public class ProcessLegalCaseReceivedEventService {
     /**
      * Processa o evento uma única vez.
      *
-     * @return o desfecho, para que o consumidor saiba se houve trabalho ou se a entrega foi descartada
+     * @return o desfecho, com a classificação e o texto extraído, para que o consumidor registre o que
+     *     aconteceu
      * @throws LegalCaseNotFoundException se o evento apontar para uma demanda inexistente
-     * @throws com.lexflow.domain.exception.InvalidStatusTransitionException se a demanda não estiver
-     *     mais em um estado do qual seja possível começar o processamento
+     * @throws com.lexflow.domain.exception.InvalidStatusTransitionException se a demanda já tiver
+     *     passado da extração
+     * @throws com.lexflow.application.exception.DocumentStorageException se o storage falhar
+     * @throws com.lexflow.application.exception.DocumentTextExtractionException se a extração falhar
+     *     por um problema de ambiente
      */
-    public LegalCaseProcessingOutcome process(LegalCaseReceivedEvent event) {
+    public LegalCaseProcessingResult process(LegalCaseReceivedEvent event) {
         Objects.requireNonNull(event, "event não pode ser nulo");
 
         ProcessingReservation reservation = processingEventStore.reserve(
@@ -65,10 +103,10 @@ public class ProcessLegalCaseReceivedEventService {
 
         switch (reservation) {
             case ALREADY_PROCESSED -> {
-                return LegalCaseProcessingOutcome.SKIPPED_ALREADY_PROCESSED;
+                return LegalCaseProcessingResult.skipped(LegalCaseProcessingOutcome.SKIPPED_ALREADY_PROCESSED);
             }
             case IN_PROGRESS_ELSEWHERE -> {
-                return LegalCaseProcessingOutcome.SKIPPED_IN_PROGRESS;
+                return LegalCaseProcessingResult.skipped(LegalCaseProcessingOutcome.SKIPPED_IN_PROGRESS);
             }
             case RESERVED -> {
                 // segue o fluxo
@@ -76,8 +114,13 @@ public class ProcessLegalCaseReceivedEventService {
         }
 
         try {
-            transactionRunner.runInTransaction(() -> startProcessing(event));
-            return LegalCaseProcessingOutcome.PROCESSED;
+            LegalCaseClassification classification =
+                    transactionRunner.inTransaction(() -> classify(event.legalCaseId()));
+            List<DocumentTextContent> textContents =
+                    extractDocumentTextService.extractPending(event.legalCaseId());
+            // Todas as etapas são retomáveis: se esta marca falhar, a próxima entrega não refaz nada.
+            processingEventStore.markProcessed(event.idempotencyKey());
+            return new LegalCaseProcessingResult(LegalCaseProcessingOutcome.PROCESSED, classification, textContents);
         } catch (RuntimeException e) {
             // Sem marcar como processado, a próxima entrega tenta de novo — que é o que o Prompt 07
             // pede. Esgotadas as tentativas, a mensagem vai para a dead-letter.
@@ -86,19 +129,52 @@ public class ProcessLegalCaseReceivedEventService {
         }
     }
 
-    private void startProcessing(LegalCaseReceivedEvent event) {
+    /**
+     * Leva a demanda até {@code EXTRACTING}, classificando-a no caminho.
+     *
+     * @return a classificação feita agora, ou nulo se a demanda já estava em {@code EXTRACTING}
+     */
+    private LegalCaseClassification classify(UUID legalCaseId) {
         LegalCase legalCase = legalCaseRepository
-                .findById(event.legalCaseId())
-                .orElseThrow(() -> new LegalCaseNotFoundException(event.legalCaseId()));
+                .findById(legalCaseId)
+                .orElseThrow(() -> new LegalCaseNotFoundException(legalCaseId));
 
-        LegalCaseStatusTransitionResult transition = statusTransitionService.transition(
+        if (legalCase.status() == LegalCaseStatus.EXTRACTING) {
+            return null;
+        }
+
+        List<LegalCaseStatusHistoryEntry> history = new ArrayList<>(2);
+        if (legalCase.status() != LegalCaseStatus.CLASSIFYING) {
+            // Qualquer status diferente de RECEIVED é recusado aqui pela máquina de estados.
+            LegalCaseStatusTransitionResult started = statusTransitionService.transition(
+                    legalCase, LegalCaseStatus.CLASSIFYING, LegalCaseStatusHistoryEntry.SYSTEM_ACTOR, TRANSITION_REASON);
+            legalCase = started.legalCase();
+            history.add(started.historyEntry());
+        }
+
+        LegalCaseClassification classification = classifier.classify(legalCase.caseType(), signalsOf(legalCase));
+
+        LegalCaseStatusTransitionResult classified = statusTransitionService.transition(
                 legalCase,
-                LegalCaseStatus.CLASSIFYING,
+                LegalCaseStatus.EXTRACTING,
                 LegalCaseStatusHistoryEntry.SYSTEM_ACTOR,
-                TRANSITION_REASON);
+                "Classificação concluída: " + classification.summary());
+        history.add(classified.historyEntry());
 
-        legalCaseRepository.save(transition.legalCase());
-        statusHistoryRepository.save(transition.historyEntry());
-        processingEventStore.markProcessed(event.idempotencyKey());
+        legalCaseRepository.save(classified.legalCase());
+        history.forEach(statusHistoryRepository::save);
+        return classification;
+    }
+
+    /** Textos escolhidos pelo requisitante: a descrição e o nome de cada arquivo. */
+    private List<String> signalsOf(LegalCase legalCase) {
+        List<String> signals = new ArrayList<>();
+        if (legalCase.description() != null) {
+            signals.add(legalCase.description());
+        }
+        documentRepository.findByLegalCaseId(legalCase.id()).stream()
+                .map(Document::fileName)
+                .forEach(signals::add);
+        return signals;
     }
 }

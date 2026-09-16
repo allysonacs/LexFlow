@@ -10,6 +10,9 @@ import java.util.UUID;
  *
  * <p>É imutável. Toda mudança de status devolve uma nova instância, o que garante que nenhum
  * colaborador consiga alterar o status "por baixo" das regras da máquina de estados.
+ *
+ * @param description texto livre do requisitante sobre a demanda; opcional. É um dos sinais usados
+ *     pela classificação determinística do tipo (Prompt 08)
  */
 public record LegalCase(
         UUID id,
@@ -17,9 +20,13 @@ public record LegalCase(
         LegalCaseType caseType,
         LegalCaseStatus status,
         String requester,
+        String description,
         CasePriority priority,
         Instant createdAt,
         Instant updatedAt) {
+
+    /** Tamanho máximo da descrição, o bastante para um resumo sem virar um documento paralelo. */
+    public static final int DESCRIPTION_MAX_LENGTH = 2000;
 
     /** Regras usadas quando nenhuma máquina de estados é informada explicitamente. */
     private static final LegalCaseStatusTransition DEFAULT_TRANSITION_RULES = new LegalCaseStatusTransitionRules();
@@ -37,6 +44,13 @@ public record LegalCase(
         if (externalReference != null && externalReference.isBlank()) {
             throw new IllegalArgumentException("externalReference, quando informado, não pode ser vazio");
         }
+        if (description != null && description.isBlank()) {
+            throw new IllegalArgumentException("description, quando informada, não pode ser vazia");
+        }
+        if (description != null && description.length() > DESCRIPTION_MAX_LENGTH) {
+            throw new IllegalArgumentException(
+                    "description não pode ter mais de %d caracteres".formatted(DESCRIPTION_MAX_LENGTH));
+        }
     }
 
     /**
@@ -51,8 +65,32 @@ public record LegalCase(
             String requester,
             CasePriority priority,
             Instant receivedAt) {
+        return receive(id, externalReference, caseType, requester, null, priority, receivedAt);
+    }
+
+    /**
+     * Mesma operação, com a descrição informada pelo requisitante.
+     *
+     * @param description pode ser nula
+     */
+    public static LegalCase receive(
+            UUID id,
+            String externalReference,
+            LegalCaseType caseType,
+            String requester,
+            String description,
+            CasePriority priority,
+            Instant receivedAt) {
         return new LegalCase(
-                id, externalReference, caseType, LegalCaseStatus.RECEIVED, requester, priority, receivedAt, receivedAt);
+                id,
+                externalReference,
+                caseType,
+                LegalCaseStatus.RECEIVED,
+                requester,
+                description,
+                priority,
+                receivedAt,
+                receivedAt);
     }
 
     /**
@@ -74,7 +112,7 @@ public record LegalCase(
         Objects.requireNonNull(transitionRules, "transitionRules não pode ser nulo");
         transitionRules.validateTransition(status, targetStatus);
         return new LegalCase(
-                id, externalReference, caseType, targetStatus, requester, priority, createdAt, occurredAt);
+                id, externalReference, caseType, targetStatus, requester, description, priority, createdAt, occurredAt);
     }
 
     /** Indica se a demanda pode ir para o status informado, sem lançar exceção. */

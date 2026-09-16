@@ -40,6 +40,9 @@ public class LegalCaseEntity {
     @Column(name = "requester", nullable = false)
     private String requester;
 
+    @Column(name = "description", length = 2000)
+    private String description;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "priority", nullable = false, length = 20)
     private CasePriority priority;
@@ -60,6 +63,7 @@ public class LegalCaseEntity {
             LegalCaseType caseType,
             LegalCaseStatus status,
             String requester,
+            String description,
             CasePriority priority,
             Instant createdAt,
             Instant updatedAt) {
@@ -68,6 +72,7 @@ public class LegalCaseEntity {
         this.caseType = caseType;
         this.status = status;
         this.requester = requester;
+        this.description = description;
         this.priority = priority;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
@@ -91,6 +96,10 @@ public class LegalCaseEntity {
 
     public String getRequester() {
         return requester;
+    }
+
+    public String getDescription() {
+        return description;
     }
 
     public CasePriority getPriority() {

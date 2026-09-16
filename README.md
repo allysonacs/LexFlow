@@ -14,8 +14,36 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - PostgreSQL 17 + pgvector, com migrations em Flyway
 - MinIO (compatível com S3) para os documentos, via AWS SDK v2
 - RabbitMQ para o processamento assíncrono, via Spring AMQP
+- Apache Tika 3.3 para extrair texto, com o Tesseract 5 para o OCR
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
+
+## Andamento
+
+Os prompts de implementação ficam em `files/` e são executados em ordem.
+
+| Prompt | Tema | Situação |
+|---|---|---|
+| 01 | Esqueleto do projeto (Gradle multi-módulo, Spring Boot, perfis) | concluído |
+| 02 | Modelo de domínio | concluído |
+| 03 | Camada de persistência (Flyway, JPA, pgvector) | concluído |
+| 04 | Máquina de estados e serviço de transição | concluído |
+| 05 | API REST de ingestão, com idempotência | concluído |
+| 06 | Storage de documentos (S3/MinIO) | concluído |
+| 07 | Fila e orquestração assíncrona (RabbitMQ, retry, dead-letter) | concluído |
+| 08 | Classificação determinística e extração de texto (Tika + Tesseract) | concluído |
+| 09 | Checklist documental determinístico | próximo |
+| 10–19 | Cliente LLM, extração de fatos, RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+
+Hoje o pipeline vai da ingestão até o texto extraído, sem nenhuma chamada a LLM:
+
+```
+POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING
+  grava demanda,                          classificação      texto de cada documento
+  documentos e histórico                  por palavras-chave em document_text_contents
+```
+
+As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
 
 ## Estrutura de módulos
 
@@ -43,7 +71,8 @@ Java puro, sem uma única dependência. As entidades são `record` imutáveis: u
 | Pacote | Conteúdo |
 |---|---|
 | `legalcase` | `LegalCase` (agregado raiz), `LegalCaseStatus`, `LegalCaseType`, `CasePriority`, `LegalCaseStatusTransition` e `LegalCaseStatusTransitionRules` |
-| `document` | `Document`, `Sha256Checksum` |
+| `document` | `Document`, `Sha256Checksum`, `DocumentFormat`, `DocumentTextContent`, `TextExtractionMethod` e `TextExtractionStatus` |
+| `classification` | `LegalCaseKeywordClassifier`, `LegalCaseClassification`, `KeywordClassification` e `ClassificationOutcome` |
 | `checklist` | `ChecklistRule`, `DocumentChecklistItem`, `ChecklistItemStatus`, `DocumentChecklist` |
 | `ai` | `AiExtractedFact`, `AiAnalysisResponse`, `ConfidenceScore`, `QuestionKey`, `VerificationStatus` |
 | `decision` | `Decision`, `DecisionType` |
@@ -59,15 +88,16 @@ Duas regras que o domínio faz cumprir sozinho, sem depender de nenhuma camada e
 Casos de uso e portas. Também sem framework: depende apenas do domínio.
 
 - **`LegalCaseStatusTransitionService`** é o **ponto único de mudança de status** do sistema. Nenhum outro componente — controller, consumer de fila, job ou repositório — pode alterar o `LegalCaseStatus` diretamente. O serviço valida a transição pelas regras do domínio e devolve, na mesma operação, a demanda já no novo status e o `LegalCaseStatusHistoryEntry` correspondente. Os dois andam juntos justamente para que nenhuma demanda mude de status sem deixar rastro no histórico.
-- O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, entra junto com os casos de uso que persistem a demanda.
+- O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, é o `LegalCaseStatusHistoryRepositoryAdapter`.
 - O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
 - **`ReceiveLegalCaseService`** é o caso de uso de ingestão: valida os arquivos, trata a idempotência, grava demanda, histórico e metadados em uma transação só e publica o evento de recebimento. **`FindLegalCaseService`** responde à consulta de status.
-- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, avança a demanda de `RECEIVED` para `CLASSIFYING` e registra o desfecho. Ele devolve um `LegalCaseProcessingOutcome` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
-- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
+- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, classifica a demanda, leva o status até `EXTRACTING` e extrai o texto dos documentos (detalhes em [Classificação e extração de texto](#classificação-e-extração-de-texto)). Ele devolve um `LegalCaseProcessingResult` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
+- **`ExtractDocumentTextService`** extrai o texto de cada documento de uma demanda e pula os que já foram lidos.
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
-- **Migrations Flyway** em `src/main/resources/db/migration`. A `V1__init_schema.sql` cria as 13 tabelas da seção 6 da base de conhecimento, habilita a extensão `vector` e cria os índices, incluindo o índice vetorial HNSW em `knowledge_base_chunks(embedding)` e o índice único de `processing_events(idempotency_key)`.
+- **Migrations Flyway** em `src/main/resources/db/migration`. A `V1__init_schema.sql` cria as 13 tabelas da seção 6 da base de conhecimento, habilita a extensão `vector` e cria os índices, incluindo o índice vetorial HNSW em `knowledge_base_chunks(embedding)` e o índice único de `processing_events(idempotency_key)`. A `V2` acrescenta `legal_cases.description` e a `V3` cria `document_text_contents`, ambas do Prompt 08.
 - **Entidades JPA** em `persistence/entity`, separadas das entidades de domínio: o módulo `lexflow-domain` não tem nenhuma anotação de persistência. A conversão entre os dois mundos fica nos mappers de `persistence/mapper`.
 - **Repositórios Spring Data** em `persistence/repository`, um por tabela.
 - As colunas `jsonb` usam `@JdbcTypeCode(SqlTypes.JSON)` e o `embedding` usa o tipo `vector`, através do módulo `hibernate-vector`.
@@ -78,7 +108,7 @@ Nos testes, o Hibernate roda com `ddl-auto: validate`. Se uma entidade e uma mig
 
 | Endpoint | Descrição |
 |---|---|
-| `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference` e um ou mais arquivos. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
+| `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference`, `description` (opcional) e um ou mais arquivos. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
 | `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados. |
 
 ```bash
@@ -87,12 +117,13 @@ curl -i -X POST http://localhost:8080/api/v1/legal-cases \
   -F "caseType=CONTRACT_SIGNING" \
   -F "requester=ana.silva" \
   -F "priority=HIGH" \
+  -F "description=Assinatura do contrato de licenciamento" \
   -F "files=@contrato.pdf"
 ```
 
 Três decisões que valem registrar:
 
-- **A ingestão não chama IA.** O endpoint grava a demanda e publica um evento; classificação, extração e análise acontecem depois, fora do ciclo da requisição. O adapter de fila entra no Prompt 07 — até lá o evento apenas vai para o log, pelo mesmo ponto de extensão.
+- **A ingestão não chama IA.** O endpoint grava a demanda e publica um evento no RabbitMQ; classificação, extração e análise acontecem depois, fora do ciclo da requisição.
 - **Idempotência pelo cabeçalho `Idempotency-Key`.** A chave é reservada em `processing_events`, cujo índice único é o que de fato impede a duplicação: duas réplicas da API que recebam a mesma chave ao mesmo tempo não conseguem criar duas demandas. Um reenvio com a mesma chave devolve `201` com a demanda original, sem criar nada e sem publicar novo evento. A chave do cliente é gravada com o prefixo `legal-case-ingestion:`, para nunca colidir com a chave de uma mensagem de fila.
 - **Formatos aceitos são regra de domínio,** não configuração da camada web: `DocumentFormat` aceita `pdf`, `docx`, `jpg`/`jpeg` e `png`. A extensão é que decide — um `application/octet-stream` genérico é tolerado, mas um mime type que contradiz a extensão é recusado. No banco vai sempre o tipo canônico do formato.
 
@@ -135,13 +166,57 @@ lexflow.events.dlx (topic) --[legal-case.received]--> lexflow.legal-case-receive
 
 **Idempotência.** Antes de processar, o consumidor reserva a `idempotencyKey` em `processing_events`. Um evento já concluído é descartado com log, e não como erro (seção 11); um que falhou antes é retomado na entrega seguinte; um que está em andamento em outra réplica é descartado. A garantia é do índice único no banco, não de uma consulta prévia.
 
-**Falha e retry.** A exceção sobe do consumidor de propósito: é ela que aciona o retry com backoff exponencial (1s → 10s, 4 tentativas) e, esgotadas as tentativas, faz o broker mandar a mensagem para a dead-letter. Capturar a exceção no listener daria um "sucesso" falso e perderia a mensagem em silêncio. A transição e a marca de "processado" ficam na mesma transação; a marca de falha fica fora dela, porque um rollback apagaria o próprio registro da falha.
+**Falha e retry.** A exceção sobe do consumidor de propósito: é ela que aciona o retry com backoff exponencial (1s → 10s, 4 tentativas) e, esgotadas as tentativas, faz o broker mandar a mensagem para a dead-letter. Capturar a exceção no listener daria um "sucesso" falso e perderia a mensagem em silêncio. As transições de status ficam em uma transação só. A marca de "processado" só é gravada depois da extração de texto, e a de falha fica fora de qualquer transação, porque um rollback apagaria o próprio registro da falha. Como todas as etapas são retomáveis (ver abaixo), uma falha entre a extração e a marca de "processado" não faz nada ser repetido.
 
 > **Limitação conhecida.** A chave de idempotência protege contra a entrega repetida do *mesmo* evento. Dois eventos *diferentes* para a mesma demanda, processados em paralelo, ainda podem ambos validar a transição em memória e gravar — não há bloqueio otimista em `legal_cases`. O fluxo atual publica exatamente um evento por demanda, então isso não é alcançável hoje; travar essa porta com uma coluna de versão é trabalho para o Prompt 17.
 
+### Classificação e extração de texto (`lexflow-application` e `lexflow-infrastructure`)
+
+Ao consumir o evento de recebimento, o worker leva a demanda de `RECEIVED` até `EXTRACTING`, classificando-a no caminho, e extrai o texto de cada documento. Nenhuma dessas etapas chama LLM.
+
+```
+RECEIVED ──► CLASSIFYING ──► EXTRACTING  (a demanda permanece aqui)
+             classificação   extração de texto, nativa ou por OCR
+             por palavras-chave
+```
+
+**Classificação.** O `LegalCaseKeywordClassifier` procura palavras-chave no nome de cada arquivo e na `description`, depois de tirar acentos e maiúsculas e de trocar `_`, `-` e `.` por espaço. Em cada posição vale a expressão mais longa da tabela: "acordo de confidencialidade" conta como contrato, e não como "acordo". O tipo informado pelo requisitante **nunca é trocado**. As palavras-chave só servem de validação cruzada, com um de três resultados: `CONFIRMED`, `UNCONFIRMED` (nenhuma evidência) ou `DIVERGENT` (os documentos apontam para outro tipo). O resultado vai para o motivo da transição `CLASSIFYING → EXTRACTING` no histórico, e a divergência também gera um `WARN` no log, para que um humano revise. Sem tipo informado, as palavras-chave decidem (`INFERRED`), mas só quando apontam um único tipo; com empate ou sem evidência, a demanda não é classificada. Hoje a API sempre exige o `caseType`, então esse caminho existe apenas no domínio. A tabela de palavras-chave está no código por enquanto; se a área jurídica passar a ajustá-la com frequência, ela deve ir para o banco, como as regras de checklist.
+
+**Extração de texto.** O `TikaDocumentTextExtractor` escolhe a estratégia pelo formato:
+
+| Formato | Estratégia | `extraction_method` |
+|---|---|---|
+| PDF com texto | Lê a camada de texto | `NATIVE_TEXT` |
+| PDF digitalizado | Se a camada de texto tiver menos de 10 letras ou dígitos por página, em média, as páginas são renderizadas a 300 dpi e passam pelo Tesseract | `OCR` |
+| DOCX | Lê a camada de texto (imagens embutidas não passam por OCR) | `NATIVE_TEXT` |
+| JPEG e PNG | Tesseract | `OCR` |
+
+O resultado vai para `document_text_contents`, com uma linha por documento, em um de três status:
+
+- `EXTRACTED`: há texto;
+- `NO_TEXT_FOUND`: o arquivo foi lido, mas não tinha texto;
+- `FAILED`: o arquivo está corrompido ou protegido; a linha guarda o motivo e nenhum texto.
+
+As falhas seguem dois caminhos, de propósito:
+
+- **Arquivo ilegível** é problema do documento. Tentar de novo não adianta: ele é registrado como `FAILED`, e a demanda segue.
+- **Tesseract ausente, tempo esgotado ou storage fora do ar** são problemas de ambiente. A exceção sobe, e a mensagem volta para a fila (retry e, depois, dead-letter).
+
+**Retomada.** Cada etapa confere o status antes de agir, e cada documento é gravado assim que termina. Uma nova tentativa depois de uma falha na extração não reclassifica a demanda e só lê os documentos que ainda não têm texto. O OCR fica fora de qualquer transação, para não prender uma conexão do banco durante minutos.
+
+**Por que a demanda para em `EXTRACTING`.** A seção 4 só permite sair de `EXTRACTING` para `AI_ANALYSIS_IN_PROGRESS`, e essa transição pertence à extração de fatos (Prompt 11), que consome o texto gravado aqui.
+
+O texto dos documentos nunca vai para o log: o `toString` de `DocumentTextContent` e de `ExtractedText` mostra apenas o tamanho.
+
 ## Como executar
 
-Pré-requisitos: um JDK instalado para rodar o Gradle e o Docker em execução. Se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente.
+Pré-requisitos:
+
+- um JDK instalado para rodar o Gradle; se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente;
+- o Docker em execução;
+- o **Tesseract** instalado, com o pacote de idioma português: `brew install tesseract tesseract-lang` no macOS, ou `apt-get install tesseract-ocr tesseract-ocr-por` no Debian e no Ubuntu.
+
+Sem o Tesseract, a aplicação sobe e registra um aviso no log. PDFs com texto e arquivos DOCX continuam sendo processados, mas imagens e PDFs digitalizados falham até que ele seja instalado. A imagem de produção precisa trazer o Tesseract e os pacotes de idioma configurados.
 
 ```bash
 # Sobe o PostgreSQL com pgvector, o MinIO (com o bucket já criado) e o RabbitMQ
@@ -170,6 +245,8 @@ Para encerrar os serviços locais: `docker compose stop` (ou `docker compose dow
 ```
 
 Os testes de integração sobem um PostgreSQL com pgvector, um MinIO e um RabbitMQ via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
+
+Os testes de extração (`TikaDocumentTextExtractorTest` e `LegalCaseClassificationExtractionIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
 
 O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
 
@@ -221,6 +298,10 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_RABBITMQ_VHOST` | Virtual host (padrão `/`) |
 | `LEXFLOW_RABBITMQ_CONCURRENCY` / `_MAX_CONCURRENCY` | Consumidores por réplica (padrão `2`–`8`) |
 | `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `4`) |
+| `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
+| `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
+| `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |
+| `LEXFLOW_OCR_DPI` | Resolução da renderização de PDFs digitalizados (padrão `300`) |
 
 ## Convenções
 

@@ -2,3 +2,9 @@
 /gradlew        text eol=lf
 *.bat           text eol=crlf
 *.jar           binary
+
+# Documentos de teste (fixtures de extração de texto): nunca converter finais de linha
+*.pdf           binary
+*.png           binary
+*.jpg           binary
+*.docx          binary

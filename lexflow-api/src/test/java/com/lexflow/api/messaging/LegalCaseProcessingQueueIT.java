@@ -12,10 +12,11 @@ import com.lexflow.domain.legalcase.LegalCaseType;
 import com.lexflow.infrastructure.messaging.LegalCaseReceivedEventListener;
 import com.lexflow.infrastructure.messaging.RabbitMqConfiguration;
 import com.lexflow.infrastructure.persistence.entity.ProcessingEventStatus;
+import com.lexflow.infrastructure.persistence.repository.DocumentTextContentJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.LegalCaseJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.LegalCaseStatusHistoryJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.ProcessingEventJpaRepository;
-import java.nio.charset.StandardCharsets;
+import com.lexflow.infrastructure.testsupport.DocumentFixtures;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -41,6 +42,9 @@ import org.springframework.util.MultiValueMap;
 /**
  * Testes de integração da orquestração assíncrona (Prompt 07), com RabbitMQ, PostgreSQL e MinIO
  * reais.
+ *
+ * <p>O foco aqui é a entrega — idempotência, retry e dead-letter. A classificação e a extração de
+ * texto que o consumo dispara (Prompt 08) são verificadas em {@code LegalCaseClassificationExtractionIT}.
  *
  * <p>O consumidor começa parado e é iniciado dentro de cada teste, depois que o cenário está montado.
  * Sem isso, o consumo em segundo plano correria contra as asserções e o resultado dependeria de quem
@@ -76,6 +80,9 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
     @Autowired
     private ProcessingEventJpaRepository processingEventRepository;
 
+    @Autowired
+    private DocumentTextContentJpaRepository textContentRepository;
+
     @BeforeEach
     void drainQueues() {
         stopListener();
@@ -101,7 +108,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         body.add("caseType", "CONTRACT_SIGNING");
         body.add("requester", "ana.silva");
-        body.add("files", new ByteArrayResource("conteúdo".getBytes(StandardCharsets.UTF_8)) {
+        body.add("files", new ByteArrayResource(DocumentFixtures.read("contrato-texto-nativo.pdf")) {
             @Override
             public String getFilename() {
                 return "contrato.pdf";
@@ -147,7 +154,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
     }
 
     @Test
-    @DisplayName("a ingestão publica o evento e o consumo avança a demanda para CLASSIFYING")
+    @DisplayName("a ingestão publica o evento e o consumo leva a demanda até EXTRACTING")
     void shouldProcessEventAndAdvanceStatus() {
         UUID legalCaseId = ingestLegalCase();
         assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.RECEIVED);
@@ -155,16 +162,15 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         startListener();
 
         await().atMost(TIMEOUT).untilAsserted(() -> {
-            assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.CLASSIFYING);
-            // A transição deixou rastro: registro inicial mais a entrada de CLASSIFYING.
+            assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING);
+            // Cada transição deixou rastro: registro inicial, CLASSIFYING e EXTRACTING. As duas
+            // últimas nascem na mesma transação, então a ordem é conferida pelo status anterior.
             assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                    .hasSize(2)
-                    .last()
-                    .satisfies(entry -> {
-                        assertThat(entry.getPreviousStatus()).isEqualTo(LegalCaseStatus.RECEIVED);
-                        assertThat(entry.getNewStatus()).isEqualTo(LegalCaseStatus.CLASSIFYING);
-                        assertThat(entry.getChangedBy()).isEqualTo("SYSTEM");
-                    });
+                    .hasSize(3)
+                    .filteredOn(entry -> entry.getPreviousStatus() != null)
+                    .allSatisfy(entry -> assertThat(entry.getChangedBy()).isEqualTo("SYSTEM"))
+                    .extracting(entry -> entry.getPreviousStatus() + "->" + entry.getNewStatus())
+                    .containsExactlyInAnyOrder("RECEIVED->CLASSIFYING", "CLASSIFYING->EXTRACTING");
             assertThat(processingEventRepository.findAll())
                     .filteredOn(event -> legalCaseId.equals(event.getAggregateId()))
                     .singleElement()
@@ -189,11 +195,12 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
                 .untilAsserted(() -> assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE))
                         .isZero());
 
-        // A segunda entrega foi descartada pela chave de idempotência: uma transição só, e nenhuma
-        // tentativa de mover CLASSIFYING para CLASSIFYING (que a máquina de estados recusaria).
-        assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.CLASSIFYING);
+        // A segunda entrega foi descartada pela chave de idempotência: um único processamento, sem
+        // transições nem extrações repetidas.
+        assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING);
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                .hasSize(2);
+                .hasSize(3);
+        assertThat(textContentRepository.findByLegalCaseId(legalCaseId)).hasSize(1);
         assertThat(processingEventRepository.findByIdempotencyKey(event.idempotencyKey()))
                 .get()
                 .satisfies(processed -> {
@@ -228,7 +235,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
 
         // Critério de aceite: a falha não travou a fila — a demanda saudável seguiu sendo processada.
         await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(statusOf(healthyCaseId)).isEqualTo(LegalCaseStatus.CLASSIFYING));
+                .untilAsserted(() -> assertThat(statusOf(healthyCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING));
         assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_DLQ)).isEqualTo(1);
     }
 
@@ -241,7 +248,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         eventPublisher.publish(event);
         startListener();
         await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.CLASSIFYING));
+                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING));
 
         // Reentrega muito depois, com o evento já concluído.
         eventPublisher.publish(event);
@@ -250,7 +257,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
                 .untilAsserted(() -> assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE))
                         .isZero());
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                .hasSize(2);
+                .hasSize(3);
         assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_DLQ)).isZero();
     }
 }

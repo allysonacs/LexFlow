@@ -12,12 +12,14 @@ import java.util.Objects;
  * <p>A conversão de texto para enum acontece antes, na borda (ver {@link LegalCaseType#of}), de modo
  * que um valor inválido é recusado sem que o caso de uso chegue a ser chamado.
  *
+ * @param description texto livre do requisitante sobre a demanda; opcional
  * @param idempotencyKey chave enviada pelo cliente no cabeçalho {@code Idempotency-Key}; opcional
  */
 public record ReceiveLegalCaseCommand(
         String externalReference,
         LegalCaseType caseType,
         String requester,
+        String description,
         CasePriority priority,
         List<DocumentUpload> documents,
         String idempotencyKey) {
@@ -35,6 +37,7 @@ public record ReceiveLegalCaseCommand(
         priority = priority == null ? CasePriority.DEFAULT : priority;
         documents = List.copyOf(documents);
         externalReference = blankToNull(externalReference);
+        description = blankToNull(description);
         idempotencyKey = blankToNull(idempotencyKey);
         requester = requester.trim();
     }

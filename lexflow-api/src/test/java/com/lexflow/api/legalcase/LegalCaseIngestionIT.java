@@ -126,7 +126,9 @@ class LegalCaseIngestionIT extends AbstractApiIT {
     @Test
     @DisplayName("GET devolve o status atual e os metadados básicos da demanda")
     void shouldReturnLegalCaseStatus() {
-        UUID legalCaseId = idOf(post(form("SUPPLIER_HIRING", file("proposta.pdf", "proposta")), null));
+        MultiValueMap<String, Object> body = form("SUPPLIER_HIRING", file("proposta.pdf", "proposta"));
+        body.add("description", "Homologação de fornecedor de limpeza");
+        UUID legalCaseId = idOf(post(body, null));
 
         ResponseEntity<String> response = restTemplate.getForEntity(BASE_PATH + "/" + legalCaseId, String.class);
 
@@ -136,6 +138,7 @@ class LegalCaseIngestionIT extends AbstractApiIT {
                 .contains("\"caseType\":\"SUPPLIER_HIRING\"")
                 .contains("\"priority\":\"HIGH\"")
                 .contains("\"requester\":\"ana.silva\"")
+                .contains("\"description\":\"Homologação de fornecedor de limpeza\"")
                 .contains("proposta.pdf")
                 // O caminho no storage é detalhe interno e não pode vazar no contrato da API.
                 .doesNotContain("storagePath");

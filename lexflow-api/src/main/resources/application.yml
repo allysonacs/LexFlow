@@ -64,6 +64,14 @@ lexflow:
     secret-key: ${LEXFLOW_STORAGE_SECRET_KEY:}
     path-style-access: ${LEXFLOW_STORAGE_PATH_STYLE:false}
     create-bucket-if-missing: false
+  # Extração de texto dos documentos (Prompt 08). O OCR usa o Tesseract instalado na máquina,
+  # com os pacotes de idioma informados.
+  extraction:
+    ocr-language: ${LEXFLOW_OCR_LANGUAGE:por}
+    tesseract-path: ${LEXFLOW_TESSERACT_PATH:}
+    ocr-timeout: ${LEXFLOW_OCR_TIMEOUT:2m}
+    ocr-dpi: ${LEXFLOW_OCR_DPI:300}
+    min-native-characters-per-page: 10
 
 server:
   port: ${LEXFLOW_SERVER_PORT:8080}

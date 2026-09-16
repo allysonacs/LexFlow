@@ -155,4 +155,33 @@ class LegalCaseTest {
 
         assertThat(legalCase.externalReference()).isNull();
     }
+
+    @Test
+    @DisplayName("a descrição é opcional, preservada nas transições e limitada em tamanho")
+    void shouldHandleDescription() {
+        LegalCase withDescription = LegalCase.receive(
+                UUID.randomUUID(),
+                null,
+                LegalCaseType.CONTRACT_SIGNING,
+                "analista",
+                "Minuta de contrato de licenciamento",
+                CasePriority.NORMAL,
+                RECEIVED_AT);
+
+        assertThat(withDescription.description()).isEqualTo("Minuta de contrato de licenciamento");
+        assertThat(withDescription.transitionTo(LegalCaseStatus.CLASSIFYING, RECEIVED_AT).description())
+                .isEqualTo("Minuta de contrato de licenciamento");
+        assertThat(newCase().description()).isNull();
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> LegalCase.receive(
+                        UUID.randomUUID(), null, LegalCaseType.CONTRACT_SIGNING, "analista", " ",
+                        CasePriority.NORMAL, RECEIVED_AT))
+                .withMessageContaining("description");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> LegalCase.receive(
+                        UUID.randomUUID(), null, LegalCaseType.CONTRACT_SIGNING, "analista",
+                        "x".repeat(LegalCase.DESCRIPTION_MAX_LENGTH + 1), CasePriority.NORMAL, RECEIVED_AT))
+                .withMessageContaining(String.valueOf(LegalCase.DESCRIPTION_MAX_LENGTH));
+    }
 }

@@ -115,6 +115,7 @@ public class ReceiveLegalCaseService {
                 command.externalReference(),
                 command.caseType(),
                 command.requester(),
+                command.description(),
                 command.priority(),
                 receivedAt);
 

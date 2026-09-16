@@ -88,6 +88,7 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
                 "REQ-2026-0042",
                 LegalCaseType.CONTRACT_SIGNING,
                 "compras@empresa.com",
+                "Minuta de contrato de licenciamento de software",
                 CasePriority.HIGH,
                 NOW);
 

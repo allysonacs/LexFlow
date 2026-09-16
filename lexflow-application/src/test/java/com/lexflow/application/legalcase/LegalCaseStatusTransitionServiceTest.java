@@ -245,6 +245,7 @@ class LegalCaseStatusTransitionServiceTest {
                 LegalCaseType.CONTRACT_SIGNING,
                 status,
                 "compras@empresa.com",
+                null,
                 CasePriority.NORMAL,
                 Instant.parse("2026-03-01T09:00:00Z"),
                 Instant.parse("2026-03-01T09:00:00Z"));

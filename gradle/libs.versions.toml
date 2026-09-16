@@ -4,6 +4,9 @@ spring-boot = "3.5.16"
 hibernate = "6.6.53.Final"
 # AWS SDK v2: usado pelo storage de documentos, contra o S3 em produção e o MinIO em desenvolvimento.
 awssdk = "2.54.19"
+# Apache Tika: extração de texto (nativo e OCR via Tesseract). A linha 4.x mudou a API de
+# configuração e ainda é recente demais; a 3.x é a estável.
+tika = "3.3.2"
 
 [libraries]
 # BOM do Spring Boot: centraliza as versões de Spring, JUnit, Testcontainers etc.
@@ -23,6 +26,12 @@ hibernate-vector = { module = "org.hibernate.orm:hibernate-vector", version.ref 
 # BOM do AWS SDK: alinha as versões dos módulos do SDK entre si.
 awssdk-bom = { module = "software.amazon.awssdk:bom", version.ref = "awssdk" }
 awssdk-s3 = { module = "software.amazon.awssdk:s3" }
+# BOM do Tika: alinha os módulos de parser entre si.
+tika-bom = { module = "org.apache.tika:tika-bom", version.ref = "tika" }
+tika-core = { module = "org.apache.tika:tika-core" }
+tika-parser-pdf = { module = "org.apache.tika:tika-parser-pdf-module" }
+tika-parser-microsoft = { module = "org.apache.tika:tika-parser-microsoft-module" }
+tika-parser-ocr = { module = "org.apache.tika:tika-parser-ocr-module" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 # Serialização de java.time nos eventos da fila; declarado por vir, de outro modo, só por transitividade.
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310" }

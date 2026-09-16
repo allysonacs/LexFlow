@@ -47,6 +47,8 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Resposta da IA | `AiAnalysisResponse` | Resposta estruturada da IA a uma pergunta jurídica específica, com fonte citada e confiança |
 | Versão de prompt | `PromptVersion` | Registro versionado do template de prompt usado, para rastreabilidade |
 | Decisão humana | `Decision` | Decisão final do responsável: aprovar, reprovar ou devolver |
+| Texto extraído | `DocumentTextContent` | Texto de um documento, obtido da camada de texto ou por OCR, sem nenhum uso de LLM (Prompt 08) |
+| Classificação da demanda | `LegalCaseClassification` | Resultado da validação do tipo de demanda por palavras-chave (seção 5.1) |
 | Log de auditoria | `AuditLog` | Registro imutável de qualquer ação relevante no sistema |
 | Evento de processamento | `ProcessingEvent` | Registro de evento assíncrono, usado para garantir idempotência |
 
@@ -69,6 +71,17 @@ Regras:
 - Transições inválidas devem lançar uma exceção de domínio (`InvalidStatusTransitionException`).
 - Toda transição gera uma linha em `legal_case_status_history`.
 - Nenhuma camada além da state machine do domínio pode alterar o status diretamente.
+- Na aplicação, o ponto único de mudança de status é o `LegalCaseStatusTransitionService`: ele valida a transição e devolve, na mesma operação, a demanda atualizada e a linha de histórico, que quem chama grava na mesma transação.
+- `RECEIVED` é o estado inicial e também gera uma linha de histórico, com `previous_status` nulo.
+
+Responsável por cada transição:
+
+| Transição | Quem executa |
+|---|---|
+| criação em `RECEIVED` | ingestão (`POST /api/v1/legal-cases`, Prompt 05) |
+| `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação, com a classificação (Prompts 07 e 08) |
+| `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11). Até lá, a demanda permanece em `EXTRACTING` com o texto dos documentos já extraído |
+| `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` e seguintes | cadeia de IA e revisão humana (Prompts 13 e 15) |
 
 ---
 
@@ -88,6 +101,30 @@ Regras:
 
 Novos tipos de demanda devem ser adicionados a este glossário antes de implementados.
 
+### 5.1 Classificação do tipo de demanda (Prompt 08)
+
+A classificação é determinística, por palavras-chave, e **nunca usa LLM**.
+
+- **Sinais:** o nome de cada arquivo e a `description` opcional da demanda. Os documentos em si não entram, porque o texto só é extraído depois da classificação.
+- **Normalização:** o texto vai para minúsculas, perde os acentos e tem os separadores (`_`, `-`, `.`) trocados por espaço. A busca é por palavra inteira.
+- **Expressão mais longa prevalece:** "acordo de confidencialidade" indica `CONTRACT_SIGNING`, e não a palavra "acordo", que indicaria `SETTLEMENT_PAYMENT`.
+- **Pontuação:** cada ocorrência soma um ponto para o tipo correspondente. Uma mesma expressão não pode apontar para dois tipos.
+- **Tipo informado pelo requisitante:** é o tipo que vale, e **nunca é substituído**. As palavras-chave servem só de validação cruzada:
+  - `CONFIRMED`: o tipo informado está entre os mais pontuados;
+  - `UNCONFIRMED`: nenhuma palavra-chave foi encontrada;
+  - `DIVERGENT`: as palavras-chave apontam para outro tipo. A divergência é registrada no motivo da transição `CLASSIFYING → EXTRACTING` e sinalizada para revisão humana.
+- **Tipo não informado:** as palavras-chave decidem (`INFERRED`), mas só quando apontam um único tipo. Com empate ou sem evidência, a demanda não é classificada (`LegalCaseTypeNotClassifiableException`), porque um palpite geraria um checklist errado. Hoje a API exige o `caseType`, então esse caminho existe apenas no domínio.
+- **Onde fica a tabela:** em `LegalCaseKeywordClassifier`. Ela muda junto com este glossário. Se a área jurídica passar a ajustá-la com frequência, deve migrar para o banco, como as regras de checklist.
+
+### 5.2 Formatos de documento aceitos (Prompt 05)
+
+`DocumentFormat` é regra de domínio e aceita `pdf`, `docx`, `jpg`/`jpeg` e `png`.
+
+- Quem decide o formato é a extensão do arquivo.
+- Um mime type genérico (`application/octet-stream`) é tolerado; um mime type que contradiz a extensão é recusado.
+- Em `documents.mime_type` vai sempre o tipo canônico do formato.
+- Ampliar a lista é uma decisão de negócio.
+
 ---
 
 ## 6. Modelo de dados (nomes de tabela em inglês)
@@ -95,8 +132,10 @@ Novos tipos de demanda devem ser adicionados a este glossário antes de implemen
 ```sql
 legal_cases (
   id, external_reference, case_type, status,
-  requester, priority, created_at, updated_at
+  requester, description, priority, created_at, updated_at
 )
+-- description: texto livre opcional do requisitante (até 2000 caracteres), sinal da classificação (Prompt 08)
+-- priority: LOW | NORMAL | HIGH | URGENT (padrão NORMAL)
 
 legal_case_status_history (
   id, legal_case_id, previous_status, new_status,
@@ -107,6 +146,15 @@ documents (
   id, legal_case_id, file_name, storage_path, mime_type,
   checksum_sha256, uploaded_at
 )
+-- único por (legal_case_id, checksum_sha256): o mesmo arquivo não é anexado duas vezes à mesma demanda
+
+document_text_contents (
+  id, document_id (unique), legal_case_id, content, extraction_method,
+  status, failure_reason, extracted_at
+)
+-- extraction_method: NATIVE_TEXT | OCR (nulo quando status = FAILED)
+-- status: EXTRACTED | NO_TEXT_FOUND | FAILED
+-- FAILED não tem content e exige failure_reason; os demais têm content (vazio em NO_TEXT_FOUND)
 
 checklist_rules (
   id, case_type, required_document_type, description, mandatory
@@ -153,7 +201,17 @@ processing_events (
 )
 ```
 
-`embedding` usa o tipo `vector` da extensão `pgvector`. `extracted_json`, `cited_chunks` e `payload` são colunas `jsonb`.
+`embedding` usa o tipo `vector` da extensão `pgvector` (dimensão 1536, com índice HNSW por similaridade de cosseno). `extracted_json`, `cited_chunks` e `payload` são colunas `jsonb`.
+
+Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
+
+| Migration | Conteúdo |
+|---|---|
+| `V1__init_schema.sql` | as 13 tabelas originais desta seção, a extensão `vector` e os índices |
+| `V2__add_legal_case_description.sql` | coluna `legal_cases.description` (Prompt 08) |
+| `V3__create_document_text_contents.sql` | tabela `document_text_contents`, com as restrições de consistência (Prompt 08) |
+
+Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
 ---
 
@@ -180,12 +238,14 @@ Regra: `domain` não depende de nenhum framework. `application` depende só de `
 - **Build:** Gradle (Kotlin DSL), multi-módulo
 - **Banco relacional:** PostgreSQL + extensão `pgvector`
 - **Migrations:** Flyway
-- **Mensageria:** Kafka (ou RabbitMQ — decidir no Prompt 7) para processamento assíncrono
-- **Storage de arquivos:** S3 (ou MinIO em dev)
+- **Mensageria:** RabbitMQ (via Spring AMQP), escolhido no Prompt 07 por simplicidade operacional. A justificativa está na seção 14.
+- **Storage de arquivos:** S3 em produção e MinIO em desenvolvimento e nos testes, via AWS SDK v2
+- **Extração de texto:** Apache Tika 3.x, com o Tesseract para OCR (idioma `por`). O Tesseract é um executável externo e precisa estar instalado no ambiente de execução.
 - **Cliente HTTP para LLM:** WebClient (Spring) ou HTTP client nativo do Java 21
 - **Resiliência:** Resilience4j (circuit breaker, retry, timeout, bulkhead)
 - **Observabilidade:** Micrometer + OpenTelemetry
-- **Testes:** JUnit 5, Testcontainers (Postgres, Kafka)
+- **Testes:** JUnit 5, AssertJ, Awaitility e Testcontainers (PostgreSQL com pgvector, RabbitMQ, MinIO). Os testes de OCR exigem o Tesseract instalado.
+- **Cobertura:** JaCoCo, com a verificação de 80% de `domain` e `application` rodando no `./gradlew build`
 
 ---
 
@@ -240,6 +300,20 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - Toda mensagem consumida da fila carrega uma `idempotency_key`.
 - Antes de processar, verificar existência da chave em `processing_events`; se já processada, ignorar (log, não erro).
 - Endpoints de escrita que podem ser re-chamados (ex.: registrar decisão) devem aceitar uma chave de idempotência do cliente.
+- Na ingestão, a chave vem no cabeçalho `Idempotency-Key` e é gravada em `processing_events` com o prefixo `legal-case-ingestion:`, para nunca colidir com a chave de uma mensagem de fila. Um reenvio com a mesma chave devolve `201` com a demanda original.
+- A chave de um evento de fila é derivada do próprio evento (`LEGAL_CASE_RECEIVED:{eventId}`), e não da chave enviada pelo cliente.
+- Estados de um evento em `processing_events`: `IN_PROGRESS`, `PROCESSED` ou `FAILED`. Um evento `FAILED` pode ser reservado de novo, e um `IN_PROGRESS` em outra réplica é descartado.
+- A marca de falha é gravada fora da transação do processamento, porque um rollback apagaria o próprio registro da falha.
+
+**Etapas retomáveis**
+- Cada etapa do consumidor confere o status atual antes de agir. Uma nova tentativa não repete a classificação de uma demanda que já está em `EXTRACTING`.
+- A extração de texto grava cada documento assim que ele termina, e uma nova tentativa só lê os documentos que ainda não têm texto (índice único em `document_text_contents.document_id`).
+- O OCR roda fora de qualquer transação, para não prender uma conexão do banco durante minutos.
+
+**Falha de documento × falha de ambiente**
+- Um arquivo ilegível (corrompido ou protegido por senha) é problema do documento. Ele é registrado como `FAILED`, e a demanda segue.
+- Tesseract ausente, OCR com tempo esgotado e storage indisponível são problemas de ambiente. A exceção sobe e a mensagem volta para a fila: o retry com backoff vai de 1s a 10s, com 4 tentativas, e depois a mensagem segue para a dead-letter.
+- A ausência do Tesseract nunca vira "documento sem texto" em silêncio.
 
 ---
 
@@ -247,6 +321,10 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 
 - Dados de demandas jurídicas são sensíveis — controle de acesso por papel (ex.: `ANALYST`, `LEGAL_REVIEWER`, `ADMIN`).
 - Nunca logar conteúdo integral de documentos, apenas metadados e hashes.
+  - O `toString` de `DocumentTextContent` e de `ExtractedText` mostra só o tamanho do texto.
+  - O motivo da classificação gravado no histórico traz apenas tipos e palavras-chave da tabela, nunca trechos do texto do requisitante.
+- Eventos de fila carregam apenas identificadores e metadados, nunca o conteúdo de documentos.
+- O nome de arquivo enviado pelo cliente é dado não confiável e não compõe o caminho no storage.
 - Avaliar política de retenção de dados do provedor de LLM antes de enviar documentos com dados pessoais.
 - `AuditLog` é append-only — nenhuma linha pode ser alterada ou apagada por código de aplicação.
 
@@ -259,3 +337,69 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - Toda exceção de domínio deve estender uma `DomainException` base e ter nome descritivo (`InvalidStatusTransitionException`, `ChecklistRuleNotFoundException`).
 - Toda entidade de domínio é imutável sempre que possível (usar métodos que retornam novo estado em vez de setters, quando fizer sentido).
 - Cobertura de teste mínima esperada para `domain` e `application`: 80%.
+
+---
+
+## 14. Decisões de implementação registradas (Prompts 01 a 08)
+
+Esta seção consolida as decisões tomadas durante a implementação que não constavam das seções anteriores. Qualquer mudança deve ser registrada aqui antes de ser implementada.
+
+**Estrutura e build (Prompt 01)**
+- Gradle 9 com Kotlin DSL e wrapper versionado. As versões de dependências ficam centralizadas em `gradle/libs.versions.toml`.
+- A classe `@SpringBootApplication` (`LexFlowApplication`) fica em `lexflow-api`, no pacote `com.lexflow`.
+- As classes de `lexflow-application` não têm anotações do Spring e são montadas como beans em `LegalCaseUseCaseConfiguration`, no módulo da API.
+- Perfis `dev` (padrão) e `prod`. Em `prod`, as credenciais vêm apenas de variáveis de ambiente.
+
+**Domínio e persistência (Prompts 02 e 03)**
+- As entidades de domínio são `record` imutáveis, sem anotações de persistência. As entidades JPA e os mappers ficam em `lexflow-infrastructure`.
+- Nos testes, o Hibernate roda com `ddl-auto: validate`: se entidade e migration divergirem, o contexto não sobe.
+- `AiAnalysisResponse` recusa, já no construtor, uma resposta sem `cited_chunks`, salvo quando o texto declara "informação não encontrada na base normativa".
+
+**Transações (Prompt 04)**
+- A porta `TransactionRunner` permite que os casos de uso delimitem transações sem depender do Spring.
+
+**Ingestão (Prompt 05)**
+- `POST /api/v1/legal-cases` (multipart) recebe `caseType`, `requester`, `priority`, `externalReference` e `description`, os três últimos opcionais, além de um ou mais arquivos em `files`. Responde `201` com `id`, `statusUrl` e o cabeçalho `Location`.
+- `GET /api/v1/legal-cases/{id}` devolve o status, os metadados e os arquivos da demanda, sem expor o caminho no storage.
+- A ingestão não classifica, não extrai e não chama IA. Ela grava tudo em uma transação e só depois publica o evento.
+- Os erros seguem um formato único (`code`, `message`, `timestamp`, `path`):
+
+  | Situação | HTTP |
+  |---|---|
+  | `DomainException` e entrada inválida | `400` |
+  | demanda inexistente | `404` |
+  | tamanho de upload excedido | `413` |
+  | conflito de idempotência ou de transição | `409` |
+  | falha do storage | `503` |
+  | demais erros (mensagem genérica) | `500` |
+
+- Limites de upload: 25 MB por arquivo e 100 MB por requisição, configuráveis.
+
+**Storage (Prompt 06)**
+- A chave do objeto é derivada do conteúdo: `legal-cases/{legalCaseId}/{checksum}{extensão}`. Isso torna o upload idempotente por construção e agrupa os objetos por demanda, o que sustenta o expurgo por caso.
+- O checksum SHA-256 é calculado pela aplicação, não pelo adapter.
+- Tempos limite explícitos no cliente S3: 30 s por chamada e 10 s por tentativa.
+
+**Fila (Prompt 07)**
+- Topologia:
+  - exchange `lexflow.events` (topic), routing key `legal-case.received` e fila `lexflow.legal-case-received`;
+  - dead-letter em `lexflow.events.dlx` e na fila `lexflow.legal-case-received.dlq`.
+- Por que RabbitMQ: para milhares de eventos por dia, Kafka e RabbitMQ atendem, e o desempate foi a simplicidade operacional. No RabbitMQ, a dead-letter é um argumento de fila e o paralelismo vem de mais réplicas; não há necessidade de reprocessar o histórico. Se surgir a exigência de replay de eventos antigos, a troca fica contida em `RabbitMqConfiguration` e nos dois adapters de mensageria.
+- O consumidor processa uma mensagem por vez por thread (`prefetch: 1`). Mensagens rejeitadas não voltam para a fila principal: vão para a dead-letter.
+- Limitação conhecida: não há bloqueio otimista em `legal_cases`, e dois eventos *diferentes* para a mesma demanda poderiam concorrer. Hoje cada demanda publica um único evento; o tratamento fica para o Prompt 17.
+
+**Classificação e extração (Prompt 08)**
+- As regras de classificação estão na seção 5.1, e o modelo de dados, na seção 6.
+- Estratégia de extração por formato:
+
+  | Formato | Estratégia | Método registrado |
+  |---|---|---|
+  | PDF com texto | lê a camada de texto | `NATIVE_TEXT` |
+  | PDF digitalizado | renderiza as páginas a 300 dpi e aplica OCR | `OCR` |
+  | DOCX | lê a camada de texto; imagens embutidas não passam por OCR | `NATIVE_TEXT` |
+  | JPEG e PNG | OCR | `OCR` |
+
+- Um PDF é considerado digitalizado quando tem menos de 10 letras ou dígitos por página, em média.
+- O texto é saneado antes de ser gravado: remove-se o caractere nulo, que o PostgreSQL recusa, e as bordas em branco.
+- Configuração em `lexflow.extraction.*`: `ocr-language`, `tesseract-path`, `ocr-timeout` (padrão 2 min por imagem ou página), `ocr-dpi` e `min-native-characters-per-page`. Um `tesseract-path` inexistente impede a aplicação de subir. Um Tesseract ausente só gera um aviso na inicialização e faz falhar os documentos que precisam de OCR.
+- A demanda termina esta etapa em `EXTRACTING`, e o texto gravado é a entrada do Prompt 11.

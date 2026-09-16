@@ -1,8 +1,10 @@
 package com.lexflow.infrastructure.messaging;
 
-import com.lexflow.application.legalcase.LegalCaseProcessingOutcome;
+import com.lexflow.application.legalcase.LegalCaseProcessingResult;
 import com.lexflow.application.legalcase.LegalCaseReceivedEvent;
 import com.lexflow.application.legalcase.ProcessLegalCaseReceivedEventService;
+import com.lexflow.domain.classification.LegalCaseClassification;
+import com.lexflow.domain.document.TextExtractionStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -12,7 +14,7 @@ import org.springframework.stereotype.Component;
  * Consumidor da fila de demandas recebidas.
  *
  * <p>É de propósito uma casca fina: desserializa, delega ao caso de uso e registra o desfecho. Toda a
- * decisão — reservar o evento, avançar o status, tratar a duplicidade — está em
+ * decisão — reservar o evento, classificar, extrair o texto, tratar a duplicidade — está em
  * {@link ProcessLegalCaseReceivedEventService}, que não conhece RabbitMQ e pode ser testado sem
  * broker nenhum.
  *
@@ -40,23 +42,52 @@ public class LegalCaseReceivedEventListener {
 
     @RabbitListener(id = LISTENER_ID, queues = RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE)
     public void onLegalCaseReceived(LegalCaseReceivedEvent event) {
-        LegalCaseProcessingOutcome outcome = processLegalCaseReceivedEventService.process(event);
+        LegalCaseProcessingResult result = processLegalCaseReceivedEventService.process(event);
 
-        if (outcome.isSkipped()) {
+        if (result.isSkipped()) {
             // Entrega repetida não é erro: a seção 11 manda registrar e seguir em frente.
             log.info(
                     "Evento {} descartado ({}): demanda={} chave={}",
                     LegalCaseReceivedEvent.EVENT_TYPE,
-                    outcome,
+                    result.outcome(),
                     event.legalCaseId(),
                     event.idempotencyKey());
             return;
         }
 
+        result.classificationIfPerformed().ifPresent(classification -> logClassification(event, classification));
+
+        // Só contagens: o texto dos documentos nunca vai para o log (seção 12).
+        long failed = result.countByStatus(TextExtractionStatus.FAILED);
+        String message = "Evento {} processado: demanda={} chave={} documentos: {} com texto, {} sem texto, {} ilegíveis";
+        Object[] arguments = {
+            LegalCaseReceivedEvent.EVENT_TYPE,
+            event.legalCaseId(),
+            event.idempotencyKey(),
+            result.countByStatus(TextExtractionStatus.EXTRACTED),
+            result.countByStatus(TextExtractionStatus.NO_TEXT_FOUND),
+            failed
+        };
+        if (failed > 0) {
+            log.warn(message, arguments);
+        } else {
+            log.info(message, arguments);
+        }
+    }
+
+    private static void logClassification(LegalCaseReceivedEvent event, LegalCaseClassification classification) {
+        if (classification.outcome().requiresAttention()) {
+            log.warn(
+                    "Classificação divergente: demanda={} tipo informado={} palavras-chave apontam {}",
+                    event.legalCaseId(),
+                    classification.declaredType(),
+                    classification.keywords().topTypes());
+            return;
+        }
         log.info(
-                "Evento {} processado: demanda={} chave={}",
-                LegalCaseReceivedEvent.EVENT_TYPE,
+                "Classificação: demanda={} tipo={} resultado={}",
                 event.legalCaseId(),
-                event.idempotencyKey());
+                classification.resolvedType(),
+                classification.outcome());
     }
 }

@@ -32,7 +32,7 @@ import org.springframework.web.multipart.MultipartFile;
  * mora aqui — nem a lista de formatos aceitos, nem o padrão de prioridade, nem a decisão sobre
  * idempotência.
  *
- * <p>A requisição nunca dispara classificação ou IA: a ingestão apenas grava e publica o evento, e o
+ * <p>A requisição nunca dispara classificação, extração ou IA: a ingestão apenas grava e publica o evento, e o
  * processamento acontece depois, fora do ciclo da requisição.
  */
 @RestController
@@ -63,6 +63,7 @@ public class LegalCaseController {
      *
      * @param caseType valor de {@code LegalCaseType}; um valor desconhecido resulta em 400
      * @param priority opcional; ausente significa {@link CasePriority#DEFAULT}
+     * @param description opcional; texto livre que ajuda a classificação do tipo (Prompt 08)
      * @param files um ou mais arquivos nos formatos aceitos
      */
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -71,6 +72,7 @@ public class LegalCaseController {
             @RequestParam("requester") String requester,
             @RequestParam(value = "priority", required = false) String priority,
             @RequestParam(value = "externalReference", required = false) String externalReference,
+            @RequestParam(value = "description", required = false) String description,
             @RequestParam("files") List<MultipartFile> files,
             @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
 
@@ -78,6 +80,7 @@ public class LegalCaseController {
                 externalReference,
                 LegalCaseType.of(caseType),
                 requester,
+                description,
                 priority == null || priority.isBlank() ? null : CasePriority.of(priority),
                 toUploads(files),
                 idempotencyKey);
