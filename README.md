@@ -2,6 +2,8 @@
 
 O LexFlow automatiza a primeira camada de análise de demandas jurídicas: recebe a documentação, classifica o tipo de demanda, confere o checklist documental e usa IA com uma base normativa (RAG) para apoiar a decisão de um responsável humano.
 
+O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde citando a fonte e o nível de confiança; a decisão é sempre de uma pessoa. Tudo que é regra determinística, como saber se um documento obrigatório está presente, é resolvido por código, nunca por LLM.
+
 > A fonte de verdade sobre domínio, regras de negócio, convenções e arquitetura é o arquivo [`docs/00-knowledge-base.md`](docs/00-knowledge-base.md). Leia esse arquivo antes de contribuir.
 
 ## Stack
@@ -9,8 +11,9 @@ O LexFlow automatiza a primeira camada de análise de demandas jurídicas: receb
 - Java 21 (com virtual threads habilitadas)
 - Spring Boot 3.5
 - Gradle 9 (Kotlin DSL), multi-módulo, com o wrapper versionado
-- PostgreSQL + pgvector, Flyway (a partir do Prompt 03)
-- Testcontainers para testes de integração
+- PostgreSQL 17 + pgvector, com migrations em Flyway
+- Testcontainers para os testes de integração
+- JaCoCo para a verificação de cobertura
 
 ## Estrutura de módulos
 
@@ -29,13 +32,66 @@ lexflow-api ──► lexflow-infrastructure ──► lexflow-application ─�
 
 O pacote raiz é `com.lexflow`. A classe `LexFlowApplication` fica nesse pacote para que o component scan encontre os beans de todos os módulos.
 
-### Cobertura de testes
+## O que já está implementado
 
-O módulo `lexflow-domain` exige no mínimo 80% de cobertura de linha, conforme a seção 13 da base de conhecimento. A verificação roda dentro do `./gradlew build` e quebra o build se a cobertura cair. O relatório em HTML fica em `lexflow-domain/build/reports/jacoco/test/html/index.html`.
+### Domínio (`lexflow-domain`)
 
-### Configuração base do Testcontainers
+Java puro, sem uma única dependência. As entidades são `record` imutáveis: uma transição de status devolve uma nova instância, em vez de alterar a existente.
 
-O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `PostgresTestcontainersConfiguration`. Ela sobe um PostgreSQL com pgvector e conecta o Spring Boot a ele automaticamente, por meio de `@ServiceConnection`. Os testes de integração de qualquer módulo podem importar essa classe:
+| Pacote | Conteúdo |
+|---|---|
+| `legalcase` | `LegalCase` (agregado raiz), `LegalCaseStatus`, `LegalCaseType`, `CasePriority`, `LegalCaseStatusTransition` e `LegalCaseStatusTransitionRules` |
+| `document` | `Document`, `Sha256Checksum` |
+| `checklist` | `ChecklistRule`, `DocumentChecklistItem`, `ChecklistItemStatus`, `DocumentChecklist` |
+| `ai` | `AiExtractedFact`, `AiAnalysisResponse`, `ConfidenceScore`, `QuestionKey`, `VerificationStatus` |
+| `decision` | `Decision`, `DecisionType` |
+| `exception` | `DomainException` (base) e as exceções específicas de cada regra |
+
+Duas regras que o domínio faz cumprir sozinho, sem depender de nenhuma camada externa:
+
+- **Máquina de estados.** As transições permitidas ficam isoladas em `LegalCaseStatusTransitionRules`, transcritas da seção 4 da base de conhecimento. Qualquer outra transição lança `InvalidStatusTransitionException`. O teste cobre a matriz completa dos 81 pares de status.
+- **Resposta da IA sem fonte é recusada.** O construtor de `AiAnalysisResponse` rejeita uma resposta sem `citedChunks`, a não ser que o texto declare que a informação não está na base normativa. Uma alucinação sem fonte não consegue nem ser instanciada.
+
+### Persistência (`lexflow-infrastructure`)
+
+- **Migrations Flyway** em `src/main/resources/db/migration`. A `V1__init_schema.sql` cria as 13 tabelas da seção 6 da base de conhecimento, habilita a extensão `vector` e cria os índices, incluindo o índice vetorial HNSW em `knowledge_base_chunks(embedding)` e o índice único de `processing_events(idempotency_key)`.
+- **Entidades JPA** em `persistence/entity`, separadas das entidades de domínio: o módulo `lexflow-domain` não tem nenhuma anotação de persistência. A conversão entre os dois mundos fica nos mappers de `persistence/mapper`.
+- **Repositórios Spring Data** em `persistence/repository`, um por tabela.
+- As colunas `jsonb` usam `@JdbcTypeCode(SqlTypes.JSON)` e o `embedding` usa o tipo `vector`, através do módulo `hibernate-vector`.
+
+Nos testes, o Hibernate roda com `ddl-auto: validate`. Se uma entidade e uma migration divergirem, o contexto nem sobe — foi assim que uma divergência de tipo de coluna apareceu já na primeira execução.
+
+## Como executar
+
+Pré-requisitos: um JDK instalado para rodar o Gradle e o Docker em execução. Se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente.
+
+```bash
+# Sobe o PostgreSQL com pgvector para desenvolvimento local
+docker compose up -d
+
+# Compila todos os módulos, roda os testes e verifica a cobertura
+./gradlew build
+
+# Sobe a aplicação (o perfil padrão é o dev); o Flyway aplica as migrations na inicialização
+./gradlew :lexflow-api:bootRun
+
+# Health check
+curl http://localhost:8080/actuator/health
+```
+
+Para encerrar o banco local: `docker compose stop` (ou `docker compose down -v`, que também apaga os dados).
+
+## Testes
+
+```bash
+./gradlew test                          # todos os módulos
+./gradlew :lexflow-domain:test          # só testes unitários, não precisam de Docker
+./gradlew :lexflow-infrastructure:test  # testes de integração, precisam de Docker
+```
+
+Os testes de integração sobem um PostgreSQL com pgvector via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como todos herdam de `AbstractPersistenceIT`, com a mesma configuração, o Spring reaproveita o contexto e o container entre as classes de teste.
+
+O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `PostgresTestcontainersConfiguration`, que os testes de qualquer módulo podem importar:
 
 ```java
 @SpringBootTest
@@ -43,22 +99,9 @@ O módulo `lexflow-infrastructure` publica *test fixtures* com a classe `Postgre
 class MeuTesteDeIntegracao { }
 ```
 
-Para rodar esses testes, o Docker precisa estar em execução.
+### Cobertura
 
-## Como executar
-
-Pré-requisito: um JDK instalado para rodar o Gradle. Se o Java 21 não estiver disponível, o toolchain do Gradle baixa essa versão automaticamente.
-
-```bash
-# Compila todos os módulos e roda os testes
-./gradlew build
-
-# Sobe a aplicação (o perfil padrão é o dev)
-./gradlew :lexflow-api:bootRun
-
-# Health check
-curl http://localhost:8080/actuator/health
-```
+O módulo `lexflow-domain` exige no mínimo 80% de cobertura de linha, conforme a seção 13 da base de conhecimento. A verificação roda dentro do `./gradlew build` e quebra o build se a cobertura cair. O relatório em HTML fica em `lexflow-domain/build/reports/jacoco/test/html/index.html`.
 
 ## Perfis e variáveis de ambiente
 
@@ -66,7 +109,7 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 
 | Perfil | Uso |
 |---|---|
-| `dev` | Perfil padrão. Tem valores locais de fallback e mostra os detalhes do health check. |
+| `dev` | Perfil padrão. Aponta para o banco do `compose.yaml` e mostra os detalhes do health check. |
 | `prod` | Ative com `SPRING_PROFILES_ACTIVE=prod`. As credenciais vêm só de variáveis de ambiente, sem valores de fallback. |
 
 | Variável | Descrição |
@@ -75,6 +118,14 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_DB_URL` | URL JDBC do PostgreSQL |
 | `LEXFLOW_DB_USERNAME` | Usuário do banco |
 | `LEXFLOW_DB_PASSWORD` | Senha do banco |
+
+## Convenções
+
+- Identificadores (classes, pacotes, tabelas, colunas, enums) em **inglês**; comentários e Javadoc em **português**.
+- Enums e status em `UPPER_SNAKE_CASE`; tabelas no plural e colunas no singular, em `snake_case`.
+- Toda exceção de domínio estende `DomainException` e tem nome descritivo.
+- Nenhuma regra de negócio na camada de persistência, e nenhuma anotação de framework no domínio.
+- As versões das dependências ficam centralizadas em `gradle/libs.versions.toml`.
 
 ## Documentação
 

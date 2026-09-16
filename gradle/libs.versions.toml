@@ -1,5 +1,7 @@
 [versions]
 spring-boot = "3.5.16"
+# Precisa acompanhar o hibernate-core trazido pelo Spring Boot; o BOM não gerencia este módulo.
+hibernate = "6.6.53.Final"
 
 [libraries]
 # BOM do Spring Boot: centraliza as versões de Spring, JUnit, Testcontainers etc.
@@ -8,9 +10,16 @@ spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies"
 spring-boot-starter = { module = "org.springframework.boot:spring-boot-starter" }
 spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-starter-data-jpa = { module = "org.springframework.boot:spring-boot-starter-data-jpa" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
 spring-boot-test = { module = "org.springframework.boot:spring-boot-test" }
 spring-boot-testcontainers = { module = "org.springframework.boot:spring-boot-testcontainers" }
+
+hibernate-vector = { module = "org.hibernate.orm:hibernate-vector", version.ref = "hibernate" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
+flyway-core = { module = "org.flywaydb:flyway-core" }
+flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql" }
+postgresql = { module = "org.postgresql:postgresql" }
 
 testcontainers-junit-jupiter = { module = "org.testcontainers:junit-jupiter" }
 testcontainers-postgresql = { module = "org.testcontainers:postgresql" }

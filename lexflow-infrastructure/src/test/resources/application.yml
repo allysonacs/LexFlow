@@ -1,0 +1,14 @@
+spring:
+  jpa:
+    # Valida o mapeamento das entidades contra o schema criado pelo Flyway.
+    # Se uma entidade e uma migration divergirem, o contexto de teste não sobe.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+logging:
+  level:
+    org.flywaydb: info

@@ -2,17 +2,24 @@ package com.lexflow;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.lexflow.infrastructure.testsupport.PostgresTestcontainersConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 /**
  * Verifica que o contexto da aplicação sobe e que o health check responde {@code UP}.
+ *
+ * <p>Desde o Prompt 03 a aplicação depende de um PostgreSQL com as migrations aplicadas, então o
+ * teste sobe um container real em vez de tentar conectar ao banco local. É preciso ter o Docker em
+ * execução.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Import(PostgresTestcontainersConfiguration.class)
 class LexFlowApplicationTest {
 
     @Autowired
@@ -24,5 +31,12 @@ class LexFlowApplicationTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).contains("\"status\":\"UP\"");
+    }
+
+    @Test
+    void healthEndpointShouldReportDatabaseComponent() {
+        ResponseEntity<String> response = restTemplate.getForEntity("/actuator/health", String.class);
+
+        assertThat(response.getBody()).contains("\"db\"");
     }
 }

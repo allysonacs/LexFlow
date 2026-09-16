@@ -10,10 +10,18 @@ dependencies {
 
     implementation(platform(libs.spring.boot.bom))
     implementation(libs.spring.boot.starter)
+    implementation(libs.spring.boot.starter.data.jpa)
+    implementation(libs.hibernate.vector)
+    implementation(libs.jackson.databind)
+    implementation(libs.flyway.core)
+    runtimeOnly(libs.flyway.postgresql)
+    runtimeOnly(libs.postgresql)
 
     testFixturesApi(platform(libs.spring.boot.bom))
     testFixturesImplementation(libs.spring.boot.test)
     testFixturesApi(libs.spring.boot.testcontainers)
     testFixturesApi(libs.testcontainers.junit.jupiter)
     testFixturesApi(libs.testcontainers.postgresql)
+
+    testImplementation(libs.spring.boot.starter.test)
 }
