@@ -1,0 +1,22 @@
+{
+  "documentKind": "CONTRATO DE PRESTAÇÃO DE SERVIÇOS",
+  "parties": [
+    {"name": "Empresa Exemplo Ltda", "role": "Contratante", "taxId": "12.345.678/0001-90"},
+    {"name": "Fornecedora Modelo S.A.", "role": "Contratada", "taxId": null}
+  ],
+  "monetaryValues": [
+    {"description": "Valor mensal", "amountText": "R$ 15.000,00", "amount": 15000.00, "currency": "BRL"}
+  ],
+  "relevantDates": [
+    {"description": "Vigência", "dateText": "12 meses a partir da assinatura", "isoDate": null}
+  ],
+  "keyClauses": [
+    {"title": "Vigência", "excerpt": "Vigência: 12 meses a partir da assinatura"}
+  ],
+  "specificFacts": {
+    "contractObject": "Prestação de serviços",
+    "contractTermText": "12 meses a partir da assinatura",
+    "terminationConditions": null,
+    "penaltyClause": null
+  }
+}
