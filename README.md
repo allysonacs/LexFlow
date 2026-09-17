@@ -24,7 +24,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 
 ## Andamento
 
-Os prompts de implementação ficam em `files/` e são executados em ordem.
+Os prompts de implementação ficam em `files/` e são executados em ordem. Os 19 estão concluídos.
 
 | Prompt | Tema | Situação |
 |---|---|---|
@@ -46,7 +46,7 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 16 | Log de auditoria imutável | concluído |
 | 17 | Revisão de resiliência e idempotência, com runbook | concluído |
 | 18 | Observabilidade e métricas de qualidade da IA | concluído |
-| 19 | Dataset de regressão de prompts | próximo |
+| 19 | Dataset de regressão de prompts | concluído |
 
 Hoje o fluxo está completo da ingestão à decisão humana:
 
@@ -548,6 +548,35 @@ O cálculo vem da visão `ai_human_agreement` (migration `V10`), e não de uma t
 
 **Log estruturado.** JSON no formato ECS apenas em `prod`: em desenvolvimento, o log legível vale mais do que o log consultável.
 
+### Dataset de regressão de prompts (`lexflow-api`)
+
+Nenhum teste com dublê responde à pergunta que mais importa antes de publicar uma mudança de prompt: **isso piorou as respostas?** O dataset de regressão responde, rodando o pipeline de IA contra casos dourados com o provedor de verdade.
+
+```bash
+export ANTHROPIC_API_KEY=...
+export LEXFLOW_EMBEDDINGS_API_KEY=...
+./gradlew regressionTest
+```
+
+**Ele nunca roda sozinho.** A tag `regression` é excluída de todas as tasks de teste comuns; só a task `regressionTest` a inclui. As chamadas custam dinheiro e o modelo não é determinístico.
+
+**Um caso é uma pasta** em `lexflow-api/src/test/resources/golden-cases/`, com um `case.json`, as normas que ele indexa e uma linha em `index.txt`. Nenhum código Java muda para acrescentar um caso — é isso que mantém o dataset vivo.
+
+**O gabarito não é o texto da resposta.** Comparar texto gerado com texto esperado reprovaria qualquer variação de redação e aprovaria uma resposta bem escrita com a conclusão errada. O que se declara são propriedades:
+
+| Campo | O que exige |
+|---|---|
+| `stance` | `GROUNDED`, `NOT_FOUND` ou `DETERMINISTIC` |
+| `mustMention` / `mustNotMention` | O que a resposta precisa dizer — e o que ela **não** pode dizer, que é onde se prendem alucinações conhecidas |
+| `mustCiteSource` | A resposta certa pela norma errada não é a resposta certa |
+| `minConfidence` / `expectedVerification` | Piso de confiança e resultado esperado da segunda checagem |
+
+O relatório sai em `lexflow-api/build/reports/prompt-regression/`: um JSON de formato estável (para `diff` entre execuções), uma cópia com data (o histórico) e um Markdown legível. Ele registra o **modelo e as versões de prompt** usadas — sem isso, dois relatórios não diriam *por que* diferem.
+
+A task reprova abaixo de 80% de perguntas corretas. Não é 100% de propósito: o modelo não é determinístico, e um dataset que falha por ruído ensina o time a ignorá-lo.
+
+> Detalhes em [`docs/prompt-regression.md`](docs/prompt-regression.md).
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -624,11 +653,12 @@ Para encerrar os serviços locais: `docker compose stop` (ou `docker compose dow
 ## Testes
 
 ```bash
-./gradlew test                          # todos os módulos
+./gradlew test                          # todos os módulos (sem o dataset de regressão)
 ./gradlew :lexflow-domain:test          # testes unitários, não precisam de Docker
 ./gradlew :lexflow-application:test     # testes unitários, não precisam de Docker
 ./gradlew :lexflow-infrastructure:test  # testes de integração, precisam de Docker
 ./gradlew :lexflow-api:test             # testes de integração da API, precisam de Docker
+./gradlew regressionTest                # dataset de regressão: chama o LLM real, sob demanda
 ```
 
 Os testes de integração sobem um PostgreSQL com pgvector, um MinIO e um RabbitMQ via Testcontainers, aplicam as migrations e validam o mapeamento das entidades contra o schema real. Como as classes herdam de uma base comum — `AbstractPersistenceIT` na infraestrutura e `AbstractApiIT` na API —, o Spring reaproveita o contexto e os containers entre elas.
@@ -659,6 +689,8 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Respostas roteirizadas.** Cada teste pode enfileirar respostas próprias.
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
+
+A máquina do dataset de regressão — o carregador dos casos, o avaliador e o relatório — é coberta na suíte normal, em `GoldenCaseDatasetTest`: um carregador quebrado ou um avaliador que aprova o que deveria reprovar só apareceriam durante uma execução paga, e tarde demais.
 
 A observabilidade é coberta em `LegalCaseCorrelationTest` (o identificador entra no log, no trace e no span, e não vaza para o trabalho seguinte), `FindOperationalMetricsServiceTest` (a matemática da concordância, inclusive a taxa nula quando não há o que medir) e `MetricsIT`, que roda o critério de aceite do Prompt 18 de ponta a ponta — concordância calculável a partir de casos decididos e métricas técnicas no formato Prometheus.
 
@@ -787,4 +819,5 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 
 - `docs/00-knowledge-base.md`: base de conhecimento do sistema
 - `docs/resilience-runbook.md`: pontos de falha conhecidos, o que acontece em cada um e como recuperar
+- `docs/prompt-regression.md`: como acrescentar casos ao dataset de regressão e como ler o relatório
 - `files/`: prompts de implementação, de `01` a `19`, a serem executados em ordem

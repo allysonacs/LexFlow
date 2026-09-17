@@ -29,7 +29,15 @@ subprojects {
     }
 
     tasks.withType<Test>().configureEach {
-        useJUnitPlatform()
+        val taskName = name
+        useJUnitPlatform {
+            // O dataset de regressão (Prompt 19) chama o LLM de verdade: ele custa dinheiro e não é
+            // determinístico. Fica fora de toda execução automática e roda só na task dedicada
+            // `regressionTest`, declarada em lexflow-api.
+            if (taskName != "regressionTest") {
+                excludeTags("regression")
+            }
+        }
     }
 
     // A seção 13 da base de conhecimento exige 80% de cobertura em domain e application.

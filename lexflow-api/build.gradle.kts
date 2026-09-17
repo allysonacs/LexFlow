@@ -29,3 +29,25 @@ dependencies {
     // O teste de contexto confere a configuração do Resilience4j lida do application.yml.
     testImplementation(libs.resilience4j.spring.boot3)
 }
+
+// Dataset de regressão de prompts (Prompt 19).
+//
+// Roda os golden cases contra o LLM e o provedor de embeddings de verdade, e por isso fica fora de
+// `check` e de qualquer execução automática: as chamadas custam dinheiro e não são determinísticas.
+// A exclusão da tag `regression` nas tasks de teste comuns está no build da raiz.
+tasks.register<Test>("regressionTest") {
+    group = "verification"
+    description = "Roda os golden cases contra o LLM real e gera o relatório de regressão de prompts."
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("regression")
+    }
+    // Nunca em cache: o objetivo é justamente comparar uma execução com a anterior.
+    outputs.upToDateWhen { false }
+    // A execução é longa e cheia de espera por rede; o log ao vivo é o que dá sinal de vida.
+    testLogging {
+        showStandardStreams = true
+        events("passed", "failed", "skipped")
+    }
+}

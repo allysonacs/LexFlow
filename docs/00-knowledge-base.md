@@ -609,3 +609,15 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Por que uma visão, e não uma tabela.** O dado já existe em `ai_analysis_responses`, `decisions` e `legal_case_alerts`. Duplicá-lo criaria uma terceira versão da verdade, que poderia divergir das outras duas — e a métrica deixaria de medir o sistema para medir a si mesma.
 - **Endpoints.** `GET /api/v1/metrics/ai-human-agreement` e `GET /api/v1/metrics/dashboard`, ambos com papel `ADMIN`. Devolvem JSON para consumo por Grafana ou Metabase; o painel visual não é do sistema.
 - **Log estruturado.** JSON no formato ECS apenas no perfil `prod`: em desenvolvimento, o log legível vale mais do que o log consultável.
+
+**Dataset de regressão de prompts (Prompt 19)**
+- **Para que serve.** Nenhum teste com dublê responde se mudar o texto de um prompt, ou trocar de modelo, piorou as respostas. O dataset roda o pipeline de IA (Prompts 11 a 14) contra casos dourados usando o provedor real e produz um relatório comparável entre execuções.
+- **Nunca roda sozinho.** A tag `regression` é excluída de todas as tasks de teste comuns; só `./gradlew regressionTest` a inclui. As chamadas custam dinheiro e o modelo não é determinístico.
+- **Um caso é uma pasta.** `lexflow-api/src/test/resources/golden-cases/<caso>/` com um `case.json` e as normas que ele indexa, mais uma linha em `index.txt`. Nenhum código precisa ser alterado para acrescentar um caso.
+- **O gabarito não é o texto da resposta.** Comparar texto gerado com texto esperado reprovaria qualquer variação de redação e aprovaria uma resposta bem escrita com a conclusão errada. O que se declara são propriedades: estar fundamentada (`stance`), mencionar (`mustMention`) e não mencionar (`mustNotMention`) determinados termos, citar uma fonte específica (`mustCiteSource`), um piso de confiança e o resultado esperado da segunda checagem. Campo omitido não é conferido.
+- **Fatos são conferidos como subconjunto.** O gabarito declara só o que importa naquele documento, e um campo novo no schema não quebra o dataset.
+- **Documentos fictícios, sempre.** Nenhum documento real de cliente entra no dataset, nem anonimizado: um contrato anonimizado continua sendo o contrato de alguém.
+- **Piso de 80%, e não 100%.** O modelo não é determinístico, e exigir perfeição faria o dataset falhar por ruído — o que ensinaria o time a ignorá-lo. O que se quer detectar é a direção entre duas execuções.
+- **O relatório registra modelo e versões de prompt.** Sem isso, dois relatórios não diriam por que diferem, e a causa muda a conclusão: uma queda após trocar o texto do prompt se resolve revertendo o texto; após trocar de modelo, não.
+- **A máquina do dataset é testada na suíte normal** (`GoldenCaseDatasetTest`), para que um carregador quebrado não apareça só durante uma execução paga.
+- Como acrescentar casos e como ler o relatório: `docs/prompt-regression.md`.

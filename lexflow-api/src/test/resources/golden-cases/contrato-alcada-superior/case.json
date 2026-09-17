@@ -1,0 +1,54 @@
+{
+  "id": "contrato-alcada-superior",
+  "description": "Contrato de prestacao de servicos com valor mensal de R$ 15.000,00, acima da alcada do gerente",
+  "caseType": "CONTRACT_SIGNING",
+  "requester": "regressao",
+  "knowledgeSources": [
+    {
+      "title": "Política de Alçadas (regressão)",
+      "sourceType": "INTERNAL_POLICY",
+      "file": "politica-alcadas.md"
+    }
+  ],
+  "documents": [
+    {
+      "fixture": "contrato-texto-nativo.pdf",
+      "documentType": "CONTRACT_DRAFT",
+      "expectedFacts": {
+        "specificFacts": {
+          "contractObject": "Prestação de serviços"
+        },
+        "monetaryValues": [
+          {"amountText": "R$ 15.000,00"}
+        ]
+      }
+    },
+    {
+      "fixture": "minuta-aditivo.docx",
+      "documentType": "FINANCIAL_OPINION"
+    }
+  ],
+  "expectedAnswers": [
+    {
+      "questionKey": "CAN_SIGN_CONTRACT",
+      "stance": "GROUNDED",
+      "mustMention": ["diretor"],
+      "mustNotMention": ["R$ 50.000,00"],
+      "mustCiteSource": "Política de Alçadas (regressão)",
+      "minConfidence": 0.4,
+      "expectedVerification": "VERIFIED"
+    },
+    {
+      "questionKey": "HAS_SUFFICIENT_DOCUMENTATION",
+      "stance": "GROUNDED",
+      "mustCiteSource": "Política de Alçadas (regressão)",
+      "minConfidence": 0.3
+    },
+    {
+      "questionKey": "COMPLIES_WITH_LAW_AND_POLICY",
+      "stance": "GROUNDED",
+      "mustCiteSource": "Política de Alçadas (regressão)",
+      "minConfidence": 0.3
+    }
+  ]
+}

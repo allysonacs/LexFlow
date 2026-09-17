@@ -1,0 +1,3 @@
+# Casos dourados do dataset de regressão (Prompt 19), um por linha.
+# Cada linha é o nome de uma pasta com um case.json. Acrescentar um caso é acrescentar uma linha.
+contrato-alcada-superior
