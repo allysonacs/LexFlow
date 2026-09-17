@@ -2,6 +2,7 @@ package com.lexflow.api.config;
 
 import com.lexflow.application.alert.LegalCaseAlertRepository;
 import com.lexflow.application.analysis.AiAnalysisResponseRepository;
+import com.lexflow.application.audit.AuditLogReader;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.document.StoreDocumentsService;
@@ -43,9 +44,15 @@ public class ReviewConfiguration {
             AiAnalysisResponseRepository responseRepository,
             LegalCaseAlertRepository alertRepository,
             DecisionRepository decisionRepository,
-            KnowledgeBaseRetriever knowledgeBaseRetriever) {
+            KnowledgeBaseRetriever knowledgeBaseRetriever,
+            AuditLogReader auditLogReader) {
         return new FindLegalCaseAnalysisService(
-                legalCaseRepository, responseRepository, alertRepository, decisionRepository, knowledgeBaseRetriever);
+                legalCaseRepository,
+                responseRepository,
+                alertRepository,
+                decisionRepository,
+                knowledgeBaseRetriever,
+                auditLogReader);
     }
 
     @Bean

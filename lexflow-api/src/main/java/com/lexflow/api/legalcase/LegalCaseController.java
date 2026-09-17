@@ -1,5 +1,6 @@
 package com.lexflow.api.legalcase;
 
+import com.lexflow.api.audit.AuditLogEntryResponse;
 import com.lexflow.api.common.PageResponse;
 import com.lexflow.api.review.DecisionRequest;
 import com.lexflow.api.review.DecisionResponse;
@@ -214,6 +215,17 @@ public class LegalCaseController {
             @RequestHeader(value = USER_ID_HEADER, required = false) String userId) {
         return LegalCaseDetailResponse.from(
                 resubmitDocumentationService.resubmit(id, toUploads(files, documentTypes), userId));
+    }
+
+    /**
+     * Linha do tempo completa de uma demanda (Prompt 16, item 4).
+     *
+     * <p>Reconstrói a história de ponta a ponta — ingestão, cada transição, cada resposta da IA e cada
+     * decisão — a partir de uma tabela que o banco não deixa alterar nem apagar.
+     */
+    @GetMapping(path = "/{id}/audit-log", produces = MediaType.APPLICATION_JSON_VALUE)
+    public List<AuditLogEntryResponse> findAuditLog(@PathVariable("id") UUID id) {
+        return analysisService.auditTrail(id).stream().map(AuditLogEntryResponse::from).toList();
     }
 
     /** Situação atual e metadados básicos de uma demanda. */

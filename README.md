@@ -42,8 +42,9 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 13 | Orquestração do prompt chain (respostas às perguntas jurídicas) | concluído |
 | 14 | Segunda checagem (self-verification) | concluído |
 | 15 | API de revisão humana e decisão | concluído |
-| 16 | Log de auditoria imutável | próximo |
-| 17–19 | Resiliência, observabilidade e dataset de regressão | pendentes |
+| 16 | Log de auditoria imutável | concluído |
+| 17 | Revisão de resiliência e idempotência | próximo |
+| 18–19 | Observabilidade e dataset de regressão | pendentes |
 
 Hoje o fluxo está completo da ingestão à decisão humana:
 
@@ -66,6 +67,7 @@ GET  /api/v1/legal-cases?status=PENDING_HUMAN_REVIEW ──► fila de revisão
 GET  /api/v1/legal-cases/{id}/analysis ──────────────► respostas, confiança e o texto das fontes
 POST /api/v1/legal-cases/{id}/decisions ─────────────► APPROVED | REJECTED | RETURNED_FOR_CORRECTION
 POST /api/v1/legal-cases/{id}/documents ─────────────► reenvio: a demanda volta para RECEIVED
+GET  /api/v1/legal-cases/{id}/audit-log ─────────────► a história completa, em uma tabela append-only
 ```
 
 As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
@@ -463,6 +465,19 @@ curl -X POST http://localhost:8080/api/v1/legal-cases/$ID/decisions \
 
 > **Limitação conhecida.** Quem decide é identificado pelo cabeçalho `X-User-Id`. Isso identifica, mas **não autentica**: qualquer cliente pode informar qualquer valor. A troca por um usuário autenticado fica contida no controller e na `SecurityConfiguration`.
 
+### Trilha de auditoria (`lexflow-infrastructure`)
+
+`GET /api/v1/legal-cases/{id}/audit-log` reconstrói a história de uma demanda: a criação, cada transição de status, cada resposta da IA, cada selo da segunda checagem e a decisão humana — com quem fez cada coisa (`SYSTEM`, `AI` ou o usuário) e o que mudou.
+
+**A trilha observa; ela não participa.** Duas decisões sustentam isso:
+
+1. **Gravar nunca lança.** O contrato da porta `AuditLogWriter` é explícito: uma falha ao registrar a linha vai para o log da aplicação e nada mais. O contrário faria uma indisponibilidade da auditoria derrubar a ingestão de demandas.
+2. **Nenhum caso de uso foi alterado para ser auditado.** A gravação acontece em decoradores dos repositórios que já existiam. Como a seção 4 exige que *toda* transição gere uma linha de histórico, auditar a gravação do histórico cobre todas as transições por construção — inclusive as que vierem depois.
+
+**Append-only é garantia do banco.** A migration `V9` instala um gatilho que recusa `UPDATE`, `DELETE` e `TRUNCATE` em `audit_logs`. Uma regra que só existisse no código Java protegeria apenas o caminho que passa por Java; o `AuditLogPersistenceIT` tenta os dois caminhos — pelo repositório e por SQL direto — e os dois são recusados.
+
+**Só metadados.** O payload registra status, tipo de decisão, `question_key`, confiança e identificadores. Nunca conteúdo de documento, texto de resposta ou comentário de decisão (seção 12).
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -574,6 +589,8 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Respostas roteirizadas.** Cada teste pode enfileirar respostas próprias.
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
+
+A trilha de auditoria é coberta em `AuditLogPersistenceIT` (a recusa de alterar, apagar e esvaziar, pelos dois caminhos) e em `LegalCaseAuditLogIT`, onde o critério de aceite do Prompt 16 é a linha do tempo reconstruindo a história de um caso de ponta a ponta — ingestão, IA e decisão.
 
 A revisão humana é coberta em `RegisterDecisionServiceTest` e `ResubmitDocumentationServiceTest` (os três desfechos, a idempotência por escopo, a devolução sem comentários e a reabertura) e, de ponta a ponta, em `LegalCaseReviewIT`, onde o critério de aceite do Prompt 15 é reenviar a mesma decisão com a mesma `Idempotency-Key` sem gerar duas linhas em `decisions` nem duas transições.
 

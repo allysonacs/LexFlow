@@ -12,8 +12,9 @@ import org.hibernate.type.SqlTypes;
 /**
  * Mapeamento da tabela {@code audit_logs}.
  *
- * <p>A tabela é append-only por definição de negócio (seção 12). A garantia no banco, com trigger ou
- * permissão, entra no Prompt 16.
+ * <p>A tabela é append-only por definição de negócio (seção 12), e o banco garante isso: a migration
+ * V9 instala um gatilho que recusa {@code UPDATE}, {@code DELETE} e {@code TRUNCATE}. A entidade não
+ * expõe nenhum setter, e nada no sistema tenta alterar uma linha já gravada.
  */
 @Entity
 @Table(name = "audit_logs")
@@ -28,6 +29,9 @@ public class AuditLogEntity {
 
     @Column(name = "entity_id", nullable = false)
     private UUID entityId;
+
+    @Column(name = "legal_case_id")
+    private UUID legalCaseId;
 
     @Column(name = "action", nullable = false, length = 100)
     private String action;
@@ -50,6 +54,7 @@ public class AuditLogEntity {
             UUID id,
             String entityType,
             UUID entityId,
+            UUID legalCaseId,
             String action,
             String actor,
             String payload,
@@ -57,6 +62,7 @@ public class AuditLogEntity {
         this.id = id;
         this.entityType = entityType;
         this.entityId = entityId;
+        this.legalCaseId = legalCaseId;
         this.action = action;
         this.actor = actor;
         this.payload = payload;
@@ -73,6 +79,10 @@ public class AuditLogEntity {
 
     public UUID getEntityId() {
         return entityId;
+    }
+
+    public UUID getLegalCaseId() {
+        return legalCaseId;
     }
 
     public String getAction() {

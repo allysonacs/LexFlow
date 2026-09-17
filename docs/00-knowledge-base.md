@@ -55,6 +55,7 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Classificação da demanda | `LegalCaseClassification` | Resultado da validação do tipo de demanda por palavras-chave (seção 5.1) |
 | Alerta da demanda | `LegalCaseAlert` | Situação que o pipeline não resolve sozinho (ex.: fatos inválidos após nova tentativa); segura a demanda até um humano tratar |
 | Log de auditoria | `AuditLog` | Registro imutável de qualquer ação relevante no sistema |
+| Ação auditada | `AuditAction` | O que foi registrado: criação, transição, resposta da IA, verificação ou decisão |
 | Evento de processamento | `ProcessingEvent` | Registro de evento assíncrono, usado para garantir idempotência |
 
 ---
@@ -217,8 +218,14 @@ decisions (
 -- decision_type: APPROVED | REJECTED | RETURNED_FOR_CORRECTION
 
 audit_logs (
-  id, entity_type, entity_id, action, actor, payload, occurred_at
+  id, entity_type, entity_id, legal_case_id, action, actor, payload, occurred_at
 )
+-- entity_type: LEGAL_CASE | AI_ANALYSIS_RESPONSE | DECISION
+-- action: LEGAL_CASE_RECEIVED | STATUS_CHANGED | AI_ANSWER_RECORDED | AI_ANSWER_VERIFIED | DECISION_REGISTERED
+-- actor: usuário identificado, SYSTEM ou AI
+-- legal_case_id: correlação, para a linha do tempo de um caso não depender de conhecer, de fora,
+--   todos os identificadores que pertencem a ele
+-- append-only: gatilho de banco recusa UPDATE, DELETE e TRUNCATE (Prompt 16)
 
 processing_events (
   id, event_type, aggregate_id, idempotency_key (unique), status,
@@ -240,6 +247,7 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V6__fact_extraction.sql` | `ai_extracted_facts.prompt_version_id`, índices únicos, `legal_case_alerts` e o prompt `FACT_EXTRACTION` v1 (Prompt 11) |
 | `V7__legal_analysis.sql` | `ai_analysis_responses.answer_source`, restrição de rastreabilidade, índice único por pergunta e o prompt `LEGAL_ANALYSIS` v1 (Prompt 13) |
 | `V8__answer_verification.sql` | `ai_analysis_responses.verification_status` e `verification_notes`, e o prompt `ANSWER_VERIFICATION` v1 (Prompt 14) |
+| `V9__audit_log_append_only.sql` | `audit_logs.legal_case_id` e o gatilho que torna a trilha append-only (Prompt 16) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -385,7 +393,8 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - Eventos de fila carregam apenas identificadores e metadados, nunca o conteúdo de documentos.
 - O nome de arquivo enviado pelo cliente é dado não confiável e não compõe o caminho no storage.
 - Avaliar política de retenção de dados do provedor de LLM antes de enviar documentos com dados pessoais.
-- `AuditLog` é append-only — nenhuma linha pode ser alterada ou apagada por código de aplicação.
+- `AuditLog` é append-only — e a garantia é do banco: um gatilho recusa `UPDATE`, `DELETE` e `TRUNCATE` (Prompt 16). Uma regra que só existe no código Java protege apenas o caminho que passa por Java.
+- O `payload` da auditoria guarda metadados do que mudou — status, tipo de decisão, identificadores —, nunca conteúdo de documento, texto de resposta ou comentário de decisão.
 
 ---
 
@@ -570,3 +579,12 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Devolução exige comentários**, já no construtor de `Decision`: devolver sem dizer o que falta não ajuda ninguém.
 - **Reabertura.** O reenvio de documentação devolve a demanda a `RECEIVED` e a deixa em condição de ser analisada de novo: as respostas anteriores da IA são descartadas (falavam de outra documentação), os alertas em aberto são resolvidos (é o reenvio que responde a eles) e o evento `LEGAL_CASE_RECEIVED` é republicado com novo identificador. Os documentos já anexados permanecem; um arquivo idêntico a um já anexado é ignorado.
 - **Evento.** `DECISION_REGISTERED` é publicado na exchange `lexflow.events`, com a chave `legal-case.decision-registered`, e a fila `lexflow.decision-registered` já é declarada — sem fila ligada à exchange, o broker descartaria em silêncio os eventos publicados antes de existir consumidor. O evento leva identificadores e metadados, nunca o comentário da decisão.
+
+**Trilha de auditoria (Prompt 16)**
+- **A trilha observa; ela não participa.** A porta `AuditLogWriter` tem um contrato explícito: a implementação nunca lança. Uma falha ao gravar a linha aparece no log da aplicação e a operação observada segue — o contrário faria uma indisponibilidade da auditoria derrubar a ingestão de demandas.
+- **Auditar não exigiu alterar nenhum caso de uso.** A gravação acontece em decoradores (`@Primary`) dos repositórios que já existiam:
+  - `AuditingLegalCaseStatusHistoryRepository`: como a seção 4 exige que *toda* transição gere uma linha de histórico, auditar a gravação do histórico cobre, por construção, todas as transições — inclusive as que forem acrescentadas depois. O registro inicial, sem status anterior, é a criação da demanda;
+  - `AuditingAiAnalysisResponseRepository`: cada resposta gravada, com ator `AI` quando veio do modelo e `SYSTEM` quando veio de regra de código; o segundo `save` da mesma resposta é o selo da verificação;
+  - `AuditingDecisionRepository`: cada decisão humana, sem o comentário.
+- **Consulta.** `GET /api/v1/legal-cases/{id}/audit-log` devolve a linha do tempo completa, da ação mais antiga para a mais recente. Uma demanda inexistente responde `404`, para que trilha vazia e demanda inexistente não se confundam.
+- **Limite conhecido.** A decisão e a transição que ela provoca ocorrem na mesma transação e no mesmo instante: a ordem entre essas duas linhas não é determinística.
