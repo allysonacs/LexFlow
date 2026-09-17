@@ -140,8 +140,10 @@ class LegalCaseFactExtractionIT extends AbstractApiIT {
     void shouldExtractFactsMatchingAnswerKey() throws Exception {
         UUID legalCaseId = ingestContract();
 
+        // Com os fatos extraídos, o pipeline segue pela cadeia de prompts (Prompt 13) até a revisão
+        // humana; o que este teste verifica é o que a extração de fatos gravou no caminho.
         await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS));
+                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW));
 
         UUID promptVersionId = promptVersionRepository
                 .findByPromptKeyAndActiveIsTrue(ExtractLegalFactsUseCase.PROMPT_KEY)
@@ -158,7 +160,8 @@ class LegalCaseFactExtractionIT extends AbstractApiIT {
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
                 .anySatisfy(entry -> assertThat(entry.getReason()).contains("Fatos extraídos de 1 documento"));
 
-        // O LLM recebeu o texto extraído do PDF, com o schema do tipo e as regras de extração.
+        // O LLM recebeu o texto extraído do PDF, com o schema do tipo e as regras de extração. A
+        // extração é sempre a primeira chamada do pipeline.
         LlmRequest request = llm.requests().getFirst();
         assertThat(request.prompt()).contains("CONTRATO DE PRESTAÇÃO DE SERVIÇOS").contains("<documento nome=\"contrato.pdf\">");
         assertThat(request.outputSchema()).isEqualTo(FactExtractionSchema.forType(LegalCaseType.CONTRACT_SIGNING));

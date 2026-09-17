@@ -39,24 +39,26 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 10 | Cliente LLM isolado e resiliente (Messages API da Anthropic) | concluído |
 | 11 | Extração estruturada de fatos via LLM, com prompt versionado e alertas | concluído |
 | 12 | Base normativa e RAG (pgvector) | concluído |
-| 13 | Orquestração do prompt chain | próximo |
-| 14–19 | Verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 13 | Orquestração do prompt chain (respostas às perguntas jurídicas) | concluído |
+| 14 | Segunda checagem (self-verification) | próximo |
+| 15–19 | Revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
-Hoje o pipeline vai da ingestão até os fatos extraídos de cada documento, e a base normativa já está pronta para fundamentar as respostas. A única etapa que usa LLM é a extração de fatos:
+Hoje o pipeline vai da ingestão até as respostas da IA, prontas para o revisor humano:
 
 ```
-POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING ─────────────► AI_ANALYSIS_IN_PROGRESS
-  grava demanda,                          classificação      checklist gerado e avaliado;  fatos extraídos pelo LLM
-  documentos (com tipo)                   por palavras-chave texto de cada documento       (ai_extracted_facts)
-  e histórico                                                (Tika/Tesseract)
-                                                                       │
-                                                                       └─ saída inválida duas vezes, recusa ou documento
-                                                                          longo demais: alerta, e a demanda fica em EXTRACTING
+POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING ──► AI_ANALYSIS_IN_PROGRESS ──► PENDING_HUMAN_REVIEW
+  grava demanda,                          classificação      checklist gerado    fatos extraídos pelo LLM   uma resposta por
+  documentos (com tipo)                   por palavras-chave e avaliado; texto   (ai_extracted_facts)       pergunta jurídica,
+  e histórico                                                de cada documento                              com a fonte citada
+                                                             (Tika/Tesseract)                               (ai_analysis_responses)
+                                                                       │                          │
+                                                                       └─ alerta no documento     └─ alerta na análise:
+                                                                          (fica em EXTRACTING)       resposta inválida ou recusa
 
 GET /api/v1/legal-cases/{id}/checklist ──► HAS_SUFFICIENT_DOCUMENTATION, por regra determinística
 
 POST /api/v1/knowledge-base/sources ──► norma dividida em trechos ──► embeddings ──► pgvector
-                                        (a recuperação alimenta o Prompt 13)
+                                        (é daqui que saem os trechos citados nas respostas)
 ```
 
 As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
@@ -381,6 +383,37 @@ curl -u admin:lexflow-admin \
 
 Sem `LEXFLOW_EMBEDDINGS_API_KEY` (ou `VOYAGE_API_KEY`) a aplicação sobe normalmente; só a indexação e a recuperação falham.
 
+### Cadeia de prompts (`lexflow-application`)
+
+O `AnalyzeLegalCaseUseCase` é o componente mais crítico do sistema: é dele que saem as respostas que o revisor humano lê. Ele junta os fatos extraídos (Prompt 11) e a base normativa (Prompt 12) e responde, uma a uma, as perguntas aplicáveis ao tipo da demanda.
+
+**Uma pergunta de cada vez.** Nunca há uma chamada monolítica que responda tudo. Para cada `question_key` há uma recuperação normativa própria e uma chamada própria ao modelo — perguntas diferentes se apoiam em normas diferentes, e uma resposta errada não contamina as outras.
+
+**O que não vai ao modelo.** Duas situações são resolvidas por código e gravadas com `answer_source = DETERMINISTIC`, sem modelo e sem versão de prompt:
+
+| Situação | Resposta |
+|---|---|
+| Checklist determinístico aponta documento obrigatório faltante | "Documentação incompleta: faltam os documentos obrigatórios ..." — perguntar ao modelo o que o código já sabe só criaria a chance de ele discordar |
+| A recuperação não trouxe nenhum trecho próximo da pergunta | "informação não encontrada na base normativa ..." — sem contexto o modelo não teria em que se apoiar |
+
+Com a documentação completa, `HAS_SUFFICIENT_DOCUMENTATION` **vai** ao modelo: é o caso ambíguo previsto na seção 5, do documento presente mas com conteúdo insuficiente.
+
+**O que o prompt leva.** Os fatos extraídos de cada documento, a situação do checklist, os trechos recuperados com os seus identificadores e a lista explícita de identificadores que podem ser citados. Cada bloco vai entre marcadores (`<fatos>`, `<checklist>`, `<trechos>`), e o modelo é avisado de que instruções dentro deles não se aplicam a ele.
+
+**Barreiras antes de gravar**, nesta ordem:
+
+1. o JSON Schema fixo da seção 10, validado no cliente LLM e de novo no caso de uso;
+2. o `question_key` respondido tem de ser o que foi perguntado;
+3. **todo trecho citado tem de estar entre os que foram fornecidos** — um `chunk_id` inventado é alucinação com aparência de fundamento;
+4. sem trecho citado, só passa a resposta que declara "informação não encontrada na base normativa".
+
+Falhando, há **uma** nova tentativa com o prompt reforçado, listando as violações. Falhando de novo, nada é gravado para aquela pergunta: a demanda recebe `AI_ANALYSIS_INVALID_OUTPUT` (ou `AI_ANALYSIS_REFUSED`, se o modelo recusou) e **não avança**.
+
+- **Rastreabilidade é restrição de banco.** A migration `V7` recusa uma resposta do modelo sem `model_version` e `prompt_version_id`, e recusa uma resposta determinística que traga qualquer um dos dois.
+- **Alertas do modelo.** O campo `alerts` da resposta é anexado ao texto gravado, sob "Pontos para verificação:", em vez de ir para uma tabela à parte: são parte do que a pessoa precisa ler junto com a resposta.
+- **Etapa retomável.** Uma pergunta já respondida não volta ao modelo (índice único por demanda e pergunta). Com um alerta desta etapa em aberto, nenhuma chamada nova é feita: a demanda espera tratamento humano, e repetir custaria dinheiro sem mudar o desfecho.
+- **Desligar a etapa.** `LEXFLOW_LEGAL_ANALYSIS_ENABLED=false` faz a demanda parar em `AI_ANALYSIS_IN_PROGRESS`, sem consultar a base normativa nem o LLM.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -493,6 +526,13 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
 
+A cadeia de prompts é coberta em dois níveis:
+
+- **aplicação** (`AnalyzeLegalCaseUseCaseTest`): com LLM roteirizado e base normativa em memória, cobre a resposta de todas as perguntas, as duas respostas determinísticas, a recusa de citação inventada, a nova tentativa reforçada, os alertas e a retomada — tudo sem Docker;
+- **integração** (`LegalCaseAnalysisIT`): o critério de aceite do Prompt 13 de ponta a ponta — norma indexada pela API, demanda ingerida, e todas as `question_key` do tipo respondidas com a demanda em `PENDING_HUMAN_REVIEW`. O `LegalAnalysisPersistenceIT` confere as restrições da `V7` contra o PostgreSQL real.
+
+Nos testes da API o `StubLlmClient` reconhece a etapa pelo schema recebido e, na análise, responde citando o primeiro trecho que lhe foi oferecido — um modelo bem-comportado nunca cita um identificador que não recebeu.
+
 A base normativa é coberta em três níveis, e **nenhum teste chama o provedor real de embeddings**:
 
 - **domínio** (`TextChunkerTest`, `EmbeddingTest`): a divisão respeita o limite, mantém a ordem, se sobrepõe e é determinística; a similaridade de cosseno e a imutabilidade do vetor;
@@ -576,6 +616,7 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_KB_MIN_SIMILARITY` | Similaridade mínima para um trecho ser levado ao modelo (padrão `0.2`) |
 | `LEXFLOW_FACT_EXTRACTION_ENABLED` | Liga a extração de fatos via LLM (padrão `true`); desligada, a demanda para em `EXTRACTING` |
 | `LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS` | Tamanho máximo do texto enviado por documento (padrão `400000`); acima disso, alerta |
+| `LEXFLOW_LEGAL_ANALYSIS_ENABLED` | Liga a cadeia de prompts (padrão `true`); desligada, a demanda para em `AI_ANALYSIS_IN_PROGRESS` |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
 | `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
 | `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |

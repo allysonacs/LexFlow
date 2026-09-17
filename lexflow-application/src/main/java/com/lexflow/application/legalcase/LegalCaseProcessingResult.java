@@ -1,5 +1,6 @@
 package com.lexflow.application.legalcase;
 
+import com.lexflow.application.analysis.LegalCaseAnalysisResult;
 import com.lexflow.application.fact.FactExtractionResult;
 import com.lexflow.domain.checklist.DocumentChecklist;
 import com.lexflow.domain.classification.LegalCaseClassification;
@@ -18,13 +19,16 @@ import java.util.Optional;
  * @param textContents texto de cada documento da demanda; vazio quando a entrega foi descartada
  * @param factExtraction resultado da extração de fatos; nulo quando a entrega foi descartada ou a
  *     etapa está desligada
+ * @param analysis resultado da análise jurídica; nulo quando a entrega foi descartada, a etapa está
+ *     desligada ou a demanda não chegou a {@code AI_ANALYSIS_IN_PROGRESS}
  */
 public record LegalCaseProcessingResult(
         LegalCaseProcessingOutcome outcome,
         LegalCaseClassification classification,
         DocumentChecklist checklist,
         List<DocumentTextContent> textContents,
-        FactExtractionResult factExtraction) {
+        FactExtractionResult factExtraction,
+        LegalCaseAnalysisResult analysis) {
 
     public LegalCaseProcessingResult {
         Objects.requireNonNull(outcome, "outcome não pode ser nulo");
@@ -36,7 +40,7 @@ public record LegalCaseProcessingResult(
         if (!outcome.isSkipped()) {
             throw new IllegalArgumentException("desfecho não é de descarte: " + outcome);
         }
-        return new LegalCaseProcessingResult(outcome, null, null, List.of(), null);
+        return new LegalCaseProcessingResult(outcome, null, null, List.of(), null, null);
     }
 
     public Optional<LegalCaseClassification> classificationIfPerformed() {
@@ -49,6 +53,10 @@ public record LegalCaseProcessingResult(
 
     public Optional<FactExtractionResult> factExtractionIfPerformed() {
         return Optional.ofNullable(factExtraction);
+    }
+
+    public Optional<LegalCaseAnalysisResult> analysisIfPerformed() {
+        return Optional.ofNullable(analysis);
     }
 
     /** Quantidade de documentos com o status de extração informado. */

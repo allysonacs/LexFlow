@@ -1,5 +1,6 @@
 package com.lexflow.infrastructure.persistence.entity;
 
+import com.lexflow.domain.ai.AnswerSource;
 import com.lexflow.domain.ai.QuestionKey;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -19,6 +20,9 @@ import org.hibernate.type.SqlTypes;
  * <p>{@code citedChunks} é uma lista de identificadores de {@code knowledge_base_chunks} gravada em
  * coluna {@code jsonb}. A coluna {@code verification_status} ainda não existe: ela entra na migration
  * do Prompt 14, junto com a segunda checagem.
+ *
+ * <p>{@code modelVersion} e {@code promptVersionId} são nulos nas respostas determinísticas, e a
+ * migration V7 garante por restrição de banco que só elas podem tê-los nulos.
  */
 @Entity
 @Table(name = "ai_analysis_responses")
@@ -45,7 +49,11 @@ public class AiAnalysisResponseEntity {
     @Column(name = "cited_chunks", nullable = false)
     private List<UUID> citedChunks;
 
-    @Column(name = "model_version", nullable = false, length = 100)
+    @Enumerated(EnumType.STRING)
+    @Column(name = "answer_source", nullable = false, length = 20)
+    private AnswerSource answerSource;
+
+    @Column(name = "model_version", length = 100)
     private String modelVersion;
 
     @Column(name = "prompt_version_id")
@@ -65,6 +73,7 @@ public class AiAnalysisResponseEntity {
             String answerText,
             double confidenceScore,
             List<UUID> citedChunks,
+            AnswerSource answerSource,
             String modelVersion,
             UUID promptVersionId,
             Instant createdAt) {
@@ -74,6 +83,7 @@ public class AiAnalysisResponseEntity {
         this.answerText = answerText;
         this.confidenceScore = confidenceScore;
         this.citedChunks = citedChunks;
+        this.answerSource = answerSource;
         this.modelVersion = modelVersion;
         this.promptVersionId = promptVersionId;
         this.createdAt = createdAt;
@@ -101,6 +111,10 @@ public class AiAnalysisResponseEntity {
 
     public List<UUID> getCitedChunks() {
         return citedChunks;
+    }
+
+    public AnswerSource getAnswerSource() {
+        return answerSource;
     }
 
     public String getModelVersion() {

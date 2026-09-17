@@ -34,6 +34,12 @@ public class LlmClientConfiguration {
         return new JsonSchemaResponseValidator(objectMapper);
     }
 
+    /** Leitor do JSON das respostas jurídicas (Prompt 13). */
+    @Bean
+    public JacksonLegalAnalysisAnswerReader legalAnalysisAnswerReader(ObjectMapper objectMapper) {
+        return new JacksonLegalAnalysisAnswerReader(objectMapper);
+    }
+
     @Bean
     public AnthropicMessagesClient anthropicMessagesClient(
             LlmClientProperties properties,

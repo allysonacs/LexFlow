@@ -25,21 +25,24 @@ public final class AiAnalysisResponseMapper {
                 response.answerText(),
                 response.confidenceScore().value(),
                 response.citedChunks(),
+                response.answerSource(),
                 response.modelVersion(),
                 response.promptVersionId(),
                 response.createdAt());
     }
 
     public static AiAnalysisResponse toDomain(AiAnalysisResponseEntity entity) {
-        return AiAnalysisResponse.of(
+        return new AiAnalysisResponse(
                 entity.getId(),
                 entity.getLegalCaseId(),
                 entity.getQuestionKey(),
                 entity.getAnswerText(),
                 ConfidenceScore.of(entity.getConfidenceScore()),
                 entity.getCitedChunks(),
+                entity.getAnswerSource(),
                 entity.getModelVersion(),
                 entity.getPromptVersionId(),
+                VerificationStatus.NOT_VERIFIED,
                 entity.getCreatedAt());
     }
 }

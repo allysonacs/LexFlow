@@ -114,7 +114,7 @@ class LegalCaseChecklistIT extends AbstractApiIT {
         listenerRegistry.getListenerContainer(LegalCaseReceivedEventListener.LISTENER_ID).start();
         await().atMost(TIMEOUT).untilAsserted(() -> {
             assertThat(legalCaseRepository.findById(legalCaseId).orElseThrow().getStatus())
-                    .isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+                    .isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW);
             assertThat(textContentRepository.findByLegalCaseId(legalCaseId)).hasSize(files.size());
         });
         return legalCaseId;

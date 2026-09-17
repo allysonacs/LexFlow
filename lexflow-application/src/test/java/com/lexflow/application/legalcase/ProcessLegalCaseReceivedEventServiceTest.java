@@ -3,7 +3,15 @@ package com.lexflow.application.legalcase;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.lexflow.application.analysis.AnalyzeLegalCaseUseCase;
+import com.lexflow.application.analysis.support.AnalysisTestDoubles;
+import com.lexflow.application.analysis.support.AnalysisTestDoubles.InMemoryAiAnalysisResponseRepository;
+import com.lexflow.application.analysis.support.AnalysisTestDoubles.SimpleLegalAnalysisAnswerReader;
 import com.lexflow.application.checklist.DocumentChecklistService;
+import com.lexflow.application.knowledge.KnowledgeBaseRetriever;
+import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseChunkRepository;
+import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseSourceRepository;
+import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.LexicalEmbeddingClient;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.exception.DocumentTextExtractionException;
@@ -77,6 +85,8 @@ class ProcessLegalCaseReceivedEventServiceTest {
     private InMemoryLegalCaseAlertRepository alertRepository;
     private ScriptedLlmClient llm;
     private InMemoryChecklistRuleRepository ruleRepository;
+    private InMemoryAiAnalysisResponseRepository analysisResponseRepository;
+    private InMemoryKnowledgeBaseChunkRepository knowledgeChunkRepository;
     private ProcessLegalCaseReceivedEventService service;
 
     private static final String VALID_FACTS = "{\"parties\": []}";
@@ -99,14 +109,45 @@ class ProcessLegalCaseReceivedEventServiceTest {
         factRepository = new InMemoryAiExtractedFactRepository();
         alertRepository = new InMemoryLegalCaseAlertRepository();
         llm = new ScriptedLlmClient().byDefault(request -> ScriptedLlmClient.response(VALID_FACTS));
+        analysisResponseRepository = new InMemoryAiAnalysisResponseRepository();
+        knowledgeChunkRepository =
+                new InMemoryKnowledgeBaseChunkRepository(new InMemoryKnowledgeBaseSourceRepository());
         service = newService(true);
     }
 
     private ProcessLegalCaseReceivedEventService newService(boolean factExtractionEnabled) {
+        return newService(factExtractionEnabled, false);
+    }
+
+    /**
+     * @param legalAnalysisEnabled desligada por padrão: a cadeia de prompts tem o seu próprio teste
+     *     ({@code AnalyzeLegalCaseUseCaseTest}), e aqui o que se verifica é a decisão do consumidor
+     */
+    private ProcessLegalCaseReceivedEventService newService(
+            boolean factExtractionEnabled, boolean legalAnalysisEnabled) {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         SequentialIdGenerator ids = new SequentialIdGenerator();
         LegalCaseStatusTransitionService transitions =
                 new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids);
+        DocumentChecklistService checklistService = new DocumentChecklistService(
+                legalCaseRepository, documentRepository, ruleRepository, checklistItemRepository, clock, ids);
+        AnalyzeLegalCaseUseCase analysis = new AnalyzeLegalCaseUseCase(
+                legalCaseRepository,
+                documentRepository,
+                factRepository,
+                checklistService,
+                new KnowledgeBaseRetriever(new LexicalEmbeddingClient(), knowledgeChunkRepository, 3, 0.0),
+                analysisResponseRepository,
+                alertRepository,
+                new InMemoryPromptVersionRepository().with(AnalysisTestDoubles.PROMPT_V1),
+                llm,
+                new FakeStructuredOutputValidator(),
+                new SimpleLegalAnalysisAnswerReader(),
+                transitions,
+                statusHistoryRepository,
+                transactionRunner,
+                clock,
+                ids);
         ExtractLegalFactsUseCase factExtraction = new ExtractLegalFactsUseCase(
                 legalCaseRepository,
                 documentRepository,
@@ -128,12 +169,13 @@ class ProcessLegalCaseReceivedEventServiceTest {
                 statusHistoryRepository,
                 transitions,
                 new LegalCaseKeywordClassifier(),
-                new DocumentChecklistService(
-                        legalCaseRepository, documentRepository, ruleRepository, checklistItemRepository, clock, ids),
+                checklistService,
                 new ExtractDocumentTextService(
                         documentRepository, textContentRepository, storage, extractor, clock, ids),
                 factExtraction,
                 factExtractionEnabled,
+                analysis,
+                legalAnalysisEnabled,
                 processingEventStore,
                 transactionRunner);
     }

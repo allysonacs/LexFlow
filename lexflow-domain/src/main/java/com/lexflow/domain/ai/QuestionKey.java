@@ -12,28 +12,46 @@ import java.util.Set;
 public enum QuestionKey {
 
     /** "Podemos contratar esse fornecedor?" */
-    CAN_HIRE_SUPPLIER,
+    CAN_HIRE_SUPPLIER("Podemos contratar esse fornecedor?"),
 
     /** "Podemos assinar esse contrato?" */
-    CAN_SIGN_CONTRACT,
+    CAN_SIGN_CONTRACT("Podemos assinar esse contrato?"),
 
     /** "Podemos pagar esse acordo?" */
-    CAN_PAY_SETTLEMENT,
+    CAN_PAY_SETTLEMENT("Podemos pagar esse acordo?"),
 
     /** "Essa ação judicial pode ser encerrada?" */
-    CAN_CLOSE_LAWSUIT,
+    CAN_CLOSE_LAWSUIT("Essa ação judicial pode ser encerrada?"),
 
     /** "Podemos aceitar essa proposta?" */
-    CAN_ACCEPT_PROPOSAL,
+    CAN_ACCEPT_PROPOSAL("Podemos aceitar essa proposta?"),
 
     /**
      * "Esse processo tem documentação suficiente?" — respondida primariamente pelo checklist
      * determinístico, não pelo LLM (seção 9).
      */
-    HAS_SUFFICIENT_DOCUMENTATION,
+    HAS_SUFFICIENT_DOCUMENTATION("Esse processo tem documentação suficiente?"),
 
     /** "Essa demanda está de acordo com a legislação e com a política da empresa?" */
-    COMPLIES_WITH_LAW_AND_POLICY;
+    COMPLIES_WITH_LAW_AND_POLICY(
+            "Essa demanda está de acordo com a legislação e com a política da empresa?");
+
+    /**
+     * Enunciado da pergunta em português, como ela é feita pela área jurídica (seção 5).
+     *
+     * <p>Fica no domínio, e não no texto do prompt, porque é a mesma pergunta que o revisor humano lê
+     * na tela: um enunciado e outro não podem divergir.
+     */
+    private final String statement;
+
+    QuestionKey(String statement) {
+        this.statement = statement;
+    }
+
+    /** Enunciado em português desta pergunta. */
+    public String statement() {
+        return statement;
+    }
 
     /**
      * Perguntas feitas para qualquer tipo de demanda.

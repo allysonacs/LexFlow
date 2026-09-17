@@ -46,7 +46,8 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Trecho normativo | `KnowledgeBaseChunk` | Pedaço de uma fonte normativa, com embedding, usado na recuperação (RAG) |
 | Vetor de um texto | `Embedding` | Representação vetorial de um texto, usada para medir proximidade de assunto |
 | Trecho recuperado | `RetrievedChunk` | Trecho devolvido pela busca por similaridade, com a fonte e o grau de proximidade |
-| Resposta da IA | `AiAnalysisResponse` | Resposta estruturada da IA a uma pergunta jurídica específica, com fonte citada e confiança |
+| Resposta da IA | `AiAnalysisResponse` | Resposta estruturada a uma pergunta jurídica específica, com fonte citada e confiança |
+| Origem da resposta | `AnswerSource` | Se a resposta veio do modelo (`LLM`) ou de uma regra de código (`DETERMINISTIC`) |
 | Versão de prompt | `PromptVersion` | Registro versionado do template de prompt usado, para rastreabilidade |
 | Decisão humana | `Decision` | Decisão final do responsável: aprovar, reprovar ou devolver |
 | Texto extraído | `DocumentTextContent` | Texto de um documento, obtido da camada de texto ou por OCR, sem nenhum uso de LLM (Prompt 08) |
@@ -84,7 +85,8 @@ Responsável por cada transição:
 | criação em `RECEIVED` | ingestão (`POST /api/v1/legal-cases`, Prompt 05) |
 | `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação da classificação e da geração do checklist (Prompts 07, 08 e 09) |
 | `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11), no mesmo consumidor da fila, quando nenhum alerta está em aberto. Com alerta, a demanda permanece em `EXTRACTING` |
-| `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` e seguintes | cadeia de IA e revisão humana (Prompts 13 e 15) |
+| `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` | cadeia de prompts (Prompt 13), quando todas as perguntas aplicáveis foram respondidas e nenhum alerta está em aberto |
+| `PENDING_HUMAN_REVIEW → APPROVED \| REJECTED \| RETURNED_FOR_CORRECTION` | revisão humana (Prompt 15) |
 
 ---
 
@@ -186,8 +188,11 @@ knowledge_base_chunks (
 
 ai_analysis_responses (
   id, legal_case_id, question_key, answer_text, confidence_score,
-  cited_chunks, model_version, prompt_version_id, created_at
+  cited_chunks, answer_source, model_version, prompt_version_id, created_at
 )
+-- answer_source: LLM | DETERMINISTIC
+-- único por (legal_case_id, question_key): uma resposta por pergunta em cada demanda
+-- LLM exige model_version e prompt_version_id; DETERMINISTIC exige os dois nulos (restrição de banco)
 
 prompt_versions (
   id, prompt_key, version, template_text, active, created_at
@@ -198,6 +203,7 @@ legal_case_alerts (
   id, legal_case_id, document_id, alert_type, message, created_at, resolved_at
 )
 -- alert_type: FACT_EXTRACTION_INVALID_OUTPUT | FACT_EXTRACTION_REFUSED | DOCUMENT_TOO_LONG_FOR_EXTRACTION
+--   | AI_ANALYSIS_INVALID_OUTPUT | AI_ANALYSIS_REFUSED
 -- alerta aberto (resolved_at nulo) impede a demanda de avançar automaticamente
 
 decisions (
@@ -227,6 +233,7 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V4__checklist_constraints_and_document_type.sql` | coluna `documents.document_type`, índices únicos de regras e de itens e restrições dos itens (Prompt 09) |
 | `V5__seed_checklist_rules.sql` | regras iniciais do checklist, com identificadores fixos (Prompt 09) |
 | `V6__fact_extraction.sql` | `ai_extracted_facts.prompt_version_id`, índices únicos, `legal_case_alerts` e o prompt `FACT_EXTRACTION` v1 (Prompt 11) |
+| `V7__legal_analysis.sql` | `ai_analysis_responses.answer_source`, restrição de rastreabilidade, índice único por pergunta e o prompt `LEGAL_ANALYSIS` v1 (Prompt 13) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -306,7 +313,7 @@ Fluxo em cadeia (prompt chaining), nunca uma única chamada monolítica:
 
 1. **Extração estruturada** (`AiExtractedFact`) — o modelo extrai fatos do documento em JSON. Sem opinião jurídica nesta etapa. Detalhes na seção 14 (Prompt 11): schema por tipo de demanda, prompt versionado, dupla validação, uma única nova tentativa e alerta quando ela também falha.
 2. **Recuperação normativa (RAG)** — para cada `question_key`, recuperar os `KnowledgeBaseChunk` mais relevantes via similaridade de embedding. Detalhes na seção 14 (Prompt 12): divisão determinística em trechos, embeddings por provedor dedicado, busca por distância de cosseno no pgvector e corte por similaridade mínima.
-3. **Resposta estruturada** — o modelo responde **apenas com base nos trechos recuperados**, no formato:
+3. **Resposta estruturada** — uma chamada por `question_key`, nunca uma chamada monolítica: perguntas diferentes se apoiam em normas diferentes, e uma resposta errada não contamina as outras. O modelo responde **apenas com base nos trechos recuperados**, no formato:
    ```json
    {
      "question_key": "CAN_SIGN_CONTRACT",
@@ -319,7 +326,9 @@ Fluxo em cadeia (prompt chaining), nunca uma única chamada monolítica:
    Validado contra um JSON Schema fixo antes de ser persistido.
 4. **Segunda checagem (self-verification)** — para perguntas críticas (`CAN_SIGN_CONTRACT`, `CAN_PAY_SETTLEMENT`, `CAN_CLOSE_LAWSUIT`), uma chamada adicional confere se a resposta é de fato suportada pelos `cited_chunks`.
 5. Toda chamada ao LLM grava qual `PromptVersion` foi usada.
-6. Nenhuma resposta é aceita sem `cited_chunks` preenchido, exceto quando o `answer` for explicitamente "informação não encontrada na base normativa".
+6. Nenhuma resposta do modelo é aceita sem `cited_chunks` preenchido, exceto quando o `answer` for explicitamente "informação não encontrada na base normativa".
+7. Nenhuma resposta é aceita citando um trecho que não foi fornecido naquela chamada: um `chunk_id` inventado é alucinação com aparência de fundamento.
+8. Duas perguntas são resolvidas por código, sem chamar o modelo, e gravadas com `answer_source = DETERMINISTIC` (Prompt 13).
 
 O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citados — nunca só o resultado final.
 
@@ -522,3 +531,16 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
   - `GET /api/v1/knowledge-base/search`, que mostra o que a busca devolveria para uma consulta, sem chamar o LLM — é ferramenta de conferência da base.
 - **Sem migration nova.** As tabelas `knowledge_base_sources` e `knowledge_base_chunks`, a extensão `vector` e o índice HNSW já vieram na `V1`.
 - **Testes.** Nenhum teste automatizado chama o provedor real de embeddings. Nos testes, o modelo é o `LexicalEmbeddingClient`: determinístico e lexical, ele reproduz a única propriedade de que a recuperação depende — textos sobre o mesmo assunto ficam próximos.
+
+**Cadeia de prompts (Prompt 13)**
+- `AnalyzeLegalCaseUseCase` roda no consumidor da fila, logo depois da extração de fatos, e leva a demanda de `AI_ANALYSIS_IN_PROGRESS` a `PENDING_HUMAN_REVIEW`. Pode ser desligado por `lexflow.pipeline.legal-analysis.enabled`; desligado, a demanda para em `AI_ANALYSIS_IN_PROGRESS`.
+- **Uma pergunta de cada vez.** Para cada `question_key` aplicável ao tipo há uma recuperação normativa própria e uma chamada própria ao modelo. O prompt leva os fatos extraídos, a situação do checklist, os trechos recuperados com os seus identificadores e a lista de identificadores que podem ser citados.
+- **O que não vai ao modelo.** Duas situações são resolvidas por código e gravadas como `DETERMINISTIC`, sem modelo e sem versão de prompt:
+  - `HAS_SUFFICIENT_DOCUMENTATION` quando o checklist determinístico aponta documento obrigatório faltante — perguntar ao modelo o que o código já sabe só criaria a chance de ele discordar. Com a documentação completa, a pergunta vai ao modelo, para o caso de um documento presente mas insuficiente (seção 5);
+  - qualquer pergunta para a qual a recuperação não trouxe nenhum trecho: sem contexto não há em que se apoiar, e a resposta honesta é declarar que a informação não está na base.
+- **Barreiras antes de gravar.** Além do JSON Schema fixo, o caso de uso confere que o `question_key` respondido é o pedido e que todo trecho citado estava entre os fornecidos. Falhando, há **uma** nova tentativa com o bloco `REFORCO`, que lista as violações; falhando de novo, nada é gravado para aquela pergunta e a demanda recebe `AI_ANALYSIS_INVALID_OUTPUT`. Recusa do modelo gera `AI_ANALYSIS_REFUSED`.
+- **Alertas do modelo.** O campo `alerts` da resposta é anexado ao texto gravado, sob "Pontos para verificação:", em vez de ir para uma tabela à parte: são parte do que a pessoa precisa ler junto com a resposta.
+- **Consulta da recuperação.** É a pergunta seguida do tipo da demanda e dos fatos, limitada a 800 caracteres: despejar todos os fatos diluiria a pergunta e faria a busca responder "que norma se parece com este contrato?" em vez de "que norma trata desta pergunta?".
+- **Retomada.** Perguntas já respondidas não voltam ao modelo (índice único por `(legal_case_id, question_key)`). Com um alerta desta etapa em aberto, nenhuma chamada nova é feita: a demanda espera tratamento humano, e repetir custaria dinheiro sem mudar o desfecho.
+- **Leitura do JSON.** A camada de aplicação não conhece biblioteca de serialização (seção 7): a porta `LegalAnalysisAnswerReader` é implementada com Jackson na infraestrutura.
+- **Testes.** Nenhum teste chama o LLM real. O critério de aceite roda em `LegalCaseAnalysisIT`, de ponta a ponta, com uma norma indexada pela API e o LLM simulado.

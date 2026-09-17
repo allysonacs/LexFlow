@@ -19,7 +19,7 @@ class AiAnalysisResponseTest {
     private static final UUID CHUNK = UUID.randomUUID();
 
     private AiAnalysisResponse response(String answerText, List<UUID> citedChunks) {
-        return AiAnalysisResponse.of(
+        return AiAnalysisResponse.fromLlm(
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 QuestionKey.CAN_SIGN_CONTRACT,
@@ -90,6 +90,39 @@ class AiAnalysisResponseTest {
     }
 
     @Test
+    @DisplayName("uma resposta determinística não cita trecho, e também não finge ter vindo de um modelo")
+    void shouldAcceptDeterministicAnswerWithoutCitedChunks() {
+        AiAnalysisResponse response = AiAnalysisResponse.deterministic(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                QuestionKey.HAS_SUFFICIENT_DOCUMENTATION,
+                "Documentação incompleta: faltam os documentos obrigatórios CONTRACT_DRAFT.",
+                CREATED_AT);
+
+        assertThat(response.isFromLlm()).isFalse();
+        assertThat(response.citedChunks()).isEmpty();
+        assertThat(response.modelVersion()).isNull();
+        assertThat(response.promptVersionId()).isNull();
+        // Uma regra determinística não tem incerteza: ou falta documento obrigatório, ou não falta.
+        assertThat(response.confidenceScore().value()).isEqualTo(1.0);
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AiAnalysisResponse(
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        QuestionKey.HAS_SUFFICIENT_DOCUMENTATION,
+                        "Documentação incompleta.",
+                        ConfidenceScore.of(1.0),
+                        List.of(),
+                        AnswerSource.DETERMINISTIC,
+                        "claude-opus-5",
+                        null,
+                        VerificationStatus.NOT_VERIFIED,
+                        CREATED_AT))
+                .withMessageContaining("determinística");
+    }
+
+    @Test
     void shouldRequireTraceabilityFields() {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> new AiAnalysisResponse(
@@ -99,6 +132,7 @@ class AiAnalysisResponseTest {
                         "Resposta.",
                         ConfidenceScore.of(0.5),
                         List.of(CHUNK),
+                        AnswerSource.LLM,
                         " ",
                         UUID.randomUUID(),
                         VerificationStatus.NOT_VERIFIED,
@@ -108,5 +142,18 @@ class AiAnalysisResponseTest {
         assertThatIllegalArgumentException()
                 .isThrownBy(() -> response("   ", List.of(CHUNK)))
                 .withMessageContaining("answerText");
+
+        assertThatThrownBy(() -> AiAnalysisResponse.fromLlm(
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        QuestionKey.CAN_SIGN_CONTRACT,
+                        "Resposta.",
+                        ConfidenceScore.of(0.5),
+                        List.of(CHUNK),
+                        "claude-opus-5",
+                        null,
+                        CREATED_AT))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("promptVersionId");
     }
 }

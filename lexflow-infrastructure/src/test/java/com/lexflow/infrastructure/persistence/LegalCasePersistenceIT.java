@@ -56,6 +56,9 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
     /** Versão de prompt semeada pela migration V6. */
     private static final UUID FACT_EXTRACTION_PROMPT_V1 = UUID.fromString("7c1d0e5a-0011-4f00-8000-000000000001");
 
+    /** Prompt de análise jurídica semeado pela migration V7 (Prompt 13). */
+    private static final UUID LEGAL_ANALYSIS_PROMPT_V1 = UUID.fromString("7c1d0e5a-0011-4f00-8000-000000000002");
+
     @Autowired
     private LegalCaseJpaRepository legalCaseRepository;
 
@@ -197,7 +200,7 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
                 UUID.randomUUID(), legalCase.id(), document.id(), extractedJson, "claude-opus-5",
                 FACT_EXTRACTION_PROMPT_V1, NOW);
         List<UUID> citedChunks = List.of(UUID.randomUUID(), UUID.randomUUID());
-        AiAnalysisResponse response = AiAnalysisResponse.of(
+        AiAnalysisResponse response = AiAnalysisResponse.fromLlm(
                 UUID.randomUUID(),
                 legalCase.id(),
                 QuestionKey.CAN_SIGN_CONTRACT,
@@ -205,7 +208,7 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
                 ConfidenceScore.of(0.87),
                 citedChunks,
                 "claude-opus-5",
-                null,
+                LEGAL_ANALYSIS_PROMPT_V1,
                 NOW);
 
         extractedFactRepository.save(AiExtractedFactMapper.toEntity(fact));

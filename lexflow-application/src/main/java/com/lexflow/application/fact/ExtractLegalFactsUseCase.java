@@ -150,7 +150,10 @@ public class ExtractLegalFactsUseCase {
                 .findById(legalCaseId)
                 .orElseThrow(() -> new LegalCaseNotFoundException(legalCaseId));
 
-        if (legalCase.status() == LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS) {
+        // Uma demanda que já passou desta etapa não a refaz: a extração está concluída, e uma nova
+        // entrega da mensagem apenas segue para a etapa seguinte.
+        if (legalCase.status() == LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS
+                || legalCase.status() == LegalCaseStatus.PENDING_HUMAN_REVIEW) {
             return new FactExtractionResult(
                     factRepository.findByLegalCaseId(legalCaseId), openAlerts(legalCaseId), 0, false);
         }

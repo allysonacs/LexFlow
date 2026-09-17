@@ -1,6 +1,9 @@
 package com.lexflow.api.config;
 
 import com.lexflow.application.alert.LegalCaseAlertRepository;
+import com.lexflow.application.analysis.AiAnalysisResponseRepository;
+import com.lexflow.application.analysis.AnalyzeLegalCaseUseCase;
+import com.lexflow.application.analysis.LegalAnalysisAnswerReader;
 import com.lexflow.application.checklist.ChecklistRuleRepository;
 import com.lexflow.application.checklist.DocumentChecklistItemRepository;
 import com.lexflow.application.checklist.DocumentChecklistService;
@@ -13,6 +16,7 @@ import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.event.ProcessingEventStore;
 import com.lexflow.application.fact.AiExtractedFactRepository;
 import com.lexflow.application.fact.ExtractLegalFactsUseCase;
+import com.lexflow.application.knowledge.KnowledgeBaseRetriever;
 import com.lexflow.application.llm.LlmClientPort;
 import com.lexflow.application.llm.StructuredOutputValidator;
 import com.lexflow.application.prompt.PromptVersionRepository;
@@ -152,10 +156,55 @@ public class LegalCaseUseCaseConfiguration {
     }
 
     /**
-     * Caso de uso disparado pelo consumo da fila (Prompts 07 a 11).
+     * Cadeia de prompts que responde às perguntas jurídicas da demanda (Prompt 13).
+     *
+     * <p>É o componente mais crítico do sistema: é dele que saem as respostas que o revisor humano lê.
+     * Toda resposta gravada traz a origem, e as vindas do modelo trazem também o modelo e a versão de
+     * prompt usados.
+     */
+    @Bean
+    public AnalyzeLegalCaseUseCase analyzeLegalCaseUseCase(
+            LegalCaseRepository legalCaseRepository,
+            DocumentRepository documentRepository,
+            AiExtractedFactRepository factRepository,
+            DocumentChecklistService checklistService,
+            KnowledgeBaseRetriever knowledgeBaseRetriever,
+            AiAnalysisResponseRepository responseRepository,
+            LegalCaseAlertRepository alertRepository,
+            PromptVersionRepository promptVersionRepository,
+            LlmClientPort llmClient,
+            StructuredOutputValidator structuredOutputValidator,
+            LegalAnalysisAnswerReader answerReader,
+            LegalCaseStatusTransitionService statusTransitionService,
+            LegalCaseStatusHistoryRepository statusHistoryRepository,
+            TransactionRunner transactionRunner,
+            Clock clock) {
+        return new AnalyzeLegalCaseUseCase(
+                legalCaseRepository,
+                documentRepository,
+                factRepository,
+                checklistService,
+                knowledgeBaseRetriever,
+                responseRepository,
+                alertRepository,
+                promptVersionRepository,
+                llmClient,
+                structuredOutputValidator,
+                answerReader,
+                statusTransitionService,
+                statusHistoryRepository,
+                transactionRunner,
+                clock,
+                UUID::randomUUID);
+    }
+
+    /**
+     * Caso de uso disparado pelo consumo da fila (Prompts 07 a 13).
      *
      * @param factExtractionEnabled desligar faz a demanda parar em {@code EXTRACTING}, sem chamar o
      *     LLM — útil em ambientes sem chave de API
+     * @param legalAnalysisEnabled desligar faz a demanda parar em {@code AI_ANALYSIS_IN_PROGRESS},
+     *     sem consultar a base normativa nem o LLM
      */
     @Bean
     public ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService(
@@ -168,6 +217,8 @@ public class LegalCaseUseCaseConfiguration {
             ExtractDocumentTextService extractDocumentTextService,
             ExtractLegalFactsUseCase extractLegalFactsUseCase,
             @Value("${lexflow.pipeline.fact-extraction.enabled:true}") boolean factExtractionEnabled,
+            AnalyzeLegalCaseUseCase analyzeLegalCaseUseCase,
+            @Value("${lexflow.pipeline.legal-analysis.enabled:true}") boolean legalAnalysisEnabled,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
         return new ProcessLegalCaseReceivedEventService(
@@ -180,6 +231,8 @@ public class LegalCaseUseCaseConfiguration {
                 extractDocumentTextService,
                 extractLegalFactsUseCase,
                 factExtractionEnabled,
+                analyzeLegalCaseUseCase,
+                legalAnalysisEnabled,
                 processingEventStore,
                 transactionRunner);
     }

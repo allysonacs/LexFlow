@@ -112,6 +112,10 @@ lexflow:
       enabled: ${LEXFLOW_FACT_EXTRACTION_ENABLED:true}
       # Documentos maiores recebem alerta para tratamento humano; nunca são truncados.
       max-document-characters: ${LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS:400000}
+    legal-analysis:
+      # Cadeia de prompts que responde às perguntas jurídicas (Prompt 13). Desligada, a demanda para
+      # em AI_ANALYSIS_IN_PROGRESS sem consultar a base normativa nem o LLM.
+      enabled: ${LEXFLOW_LEGAL_ANALYSIS_ENABLED:true}
   # Extração de texto dos documentos (Prompt 08). O OCR usa o Tesseract instalado na máquina,
   # com os pacotes de idioma informados.
   extraction:

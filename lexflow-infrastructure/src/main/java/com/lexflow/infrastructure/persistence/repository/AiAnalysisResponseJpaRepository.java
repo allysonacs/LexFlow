@@ -12,5 +12,8 @@ public interface AiAnalysisResponseJpaRepository extends JpaRepository<AiAnalysi
 
     List<AiAnalysisResponseEntity> findByLegalCaseId(UUID legalCaseId);
 
+    /** Respostas na ordem em que foram geradas, que é a ordem em que as perguntas são feitas. */
+    List<AiAnalysisResponseEntity> findByLegalCaseIdOrderByCreatedAtAscQuestionKeyAsc(UUID legalCaseId);
+
     Optional<AiAnalysisResponseEntity> findByLegalCaseIdAndQuestionKey(UUID legalCaseId, QuestionKey questionKey);
 }

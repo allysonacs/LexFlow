@@ -1,5 +1,7 @@
 package com.lexflow.application.legalcase;
 
+import com.lexflow.application.analysis.AnalyzeLegalCaseUseCase;
+import com.lexflow.application.analysis.LegalCaseAnalysisResult;
 import com.lexflow.application.checklist.DocumentChecklistService;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.ExtractDocumentTextService;
@@ -37,11 +39,13 @@ import java.util.UUID;
  *   <li><strong>extração de texto</strong> de cada documento, nativa ou por OCR;
  *   <li><strong>extração de fatos</strong> via LLM (Prompt 11), que leva a demanda a
  *       {@code AI_ANALYSIS_IN_PROGRESS} — ou a deixa em {@code EXTRACTING}, com alerta, quando algum
- *       documento precisa de atenção humana.
+ *       documento precisa de atenção humana;
+ *   <li><strong>análise jurídica</strong> (Prompt 13): cada pergunta aplicável ao tipo da demanda é
+ *       respondida com apoio da base normativa, e a demanda segue para {@code PENDING_HUMAN_REVIEW}.
  * </ol>
  *
- * <p>Até o Prompt 11 este fluxo não chamava LLM, e a extração de fatos pode ser desligada por
- * configuração: nesse caso a demanda termina em {@code EXTRACTING}, como antes.
+ * <p>As duas etapas de IA podem ser desligadas por configuração: sem a extração de fatos a demanda
+ * termina em {@code EXTRACTING}; sem a análise, em {@code AI_ANALYSIS_IN_PROGRESS}.
  *
  * <p><strong>A ordem das operações não é arbitrária.</strong> A reserva do evento vem antes de
  * qualquer escrita, para que uma entrega duplicada seja descartada sem efeito. As duas transições
@@ -72,6 +76,8 @@ public class ProcessLegalCaseReceivedEventService {
     private final ExtractDocumentTextService extractDocumentTextService;
     private final ExtractLegalFactsUseCase extractLegalFactsUseCase;
     private final boolean factExtractionEnabled;
+    private final AnalyzeLegalCaseUseCase analyzeLegalCaseUseCase;
+    private final boolean legalAnalysisEnabled;
     private final ProcessingEventStore processingEventStore;
     private final TransactionRunner transactionRunner;
 
@@ -85,6 +91,8 @@ public class ProcessLegalCaseReceivedEventService {
             ExtractDocumentTextService extractDocumentTextService,
             ExtractLegalFactsUseCase extractLegalFactsUseCase,
             boolean factExtractionEnabled,
+            AnalyzeLegalCaseUseCase analyzeLegalCaseUseCase,
+            boolean legalAnalysisEnabled,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
         this.legalCaseRepository = Objects.requireNonNull(legalCaseRepository, "legalCaseRepository não pode ser nulo");
@@ -100,6 +108,9 @@ public class ProcessLegalCaseReceivedEventService {
         this.extractLegalFactsUseCase =
                 Objects.requireNonNull(extractLegalFactsUseCase, "extractLegalFactsUseCase não pode ser nulo");
         this.factExtractionEnabled = factExtractionEnabled;
+        this.analyzeLegalCaseUseCase =
+                Objects.requireNonNull(analyzeLegalCaseUseCase, "analyzeLegalCaseUseCase não pode ser nulo");
+        this.legalAnalysisEnabled = legalAnalysisEnabled;
         this.processingEventStore = Objects.requireNonNull(processingEventStore, "processingEventStore não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
     }
@@ -144,6 +155,12 @@ public class ProcessLegalCaseReceivedEventService {
                     extractDocumentTextService.extractPending(event.legalCaseId());
             FactExtractionResult facts =
                     factExtractionEnabled ? extractLegalFactsUseCase.extract(event.legalCaseId()) : null;
+            // A análise só roda quando nada ficou pendente na extração: com um documento em alerta, a
+            // demanda continua em EXTRACTING e não há o que analisar ainda. A condição olha os alertas,
+            // e não o "avançou agora", para que uma nova tentativa retome a análise de onde parou.
+            LegalCaseAnalysisResult analysis = legalAnalysisEnabled && facts != null && facts.openAlerts().isEmpty()
+                    ? analyzeLegalCaseUseCase.analyze(event.legalCaseId())
+                    : null;
             // Todas as etapas são retomáveis: se esta marca falhar, a próxima entrega não refaz nada.
             processingEventStore.markProcessed(event.idempotencyKey());
             return new LegalCaseProcessingResult(
@@ -151,7 +168,8 @@ public class ProcessLegalCaseReceivedEventService {
                     classified.classification(),
                     classified.checklist(),
                     textContents,
-                    facts);
+                    facts,
+                    analysis);
         } catch (RuntimeException e) {
             // Sem marcar como processado, a próxima entrega tenta de novo — que é o que o Prompt 07
             // pede. Esgotadas as tentativas, a mensagem vai para a dead-letter.
