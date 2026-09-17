@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.lexflow.application.document.DocumentTextExtractor;
 import com.lexflow.application.document.ExtractedText;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles;
+import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryIdempotencyStore;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseChunkRepository;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseSourceRepository;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.LexicalEmbeddingClient;
@@ -260,6 +261,7 @@ class KnowledgeBaseRagTest {
                 embeddingClient,
                 new TextChunker(ChunkingPolicy.DEFAULT),
                 textExtractor,
+                new InMemoryIdempotencyStore(),
                 KnowledgeBaseTestDoubles.directTransactionRunner(),
                 UUID::randomUUID);
     }

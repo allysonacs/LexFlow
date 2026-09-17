@@ -5,6 +5,10 @@ import com.lexflow.application.analysis.AiAnalysisResponseRepository;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.document.StoreDocumentsService;
+import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.application.idempotency.IdempotencyNamespace;
+import com.lexflow.application.idempotency.IdempotentOperation;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.legalcase.LegalCaseReceivedEvent;
 import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
 import com.lexflow.application.legalcase.LegalCaseRepository;
@@ -24,6 +28,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -61,6 +66,7 @@ public class ResubmitDocumentationService {
     private final LegalCaseStatusTransitionService statusTransitionService;
     private final LegalCaseStatusHistoryRepository statusHistoryRepository;
     private final StoreDocumentsService storeDocumentsService;
+    private final IdempotentOperationStore idempotencyStore;
     private final LegalCaseReceivedEventPublisher eventPublisher;
     private final TransactionRunner transactionRunner;
     private final Clock clock;
@@ -74,6 +80,7 @@ public class ResubmitDocumentationService {
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             StoreDocumentsService storeDocumentsService,
+            IdempotentOperationStore idempotencyStore,
             LegalCaseReceivedEventPublisher eventPublisher,
             TransactionRunner transactionRunner,
             Clock clock,
@@ -88,6 +95,7 @@ public class ResubmitDocumentationService {
                 Objects.requireNonNull(statusHistoryRepository, "statusHistoryRepository não pode ser nulo");
         this.storeDocumentsService =
                 Objects.requireNonNull(storeDocumentsService, "storeDocumentsService não pode ser nulo");
+        this.idempotencyStore = Objects.requireNonNull(idempotencyStore, "idempotencyStore não pode ser nulo");
         this.eventPublisher = Objects.requireNonNull(eventPublisher, "eventPublisher não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
         this.clock = Objects.requireNonNull(clock, "clock não pode ser nulo");
@@ -98,13 +106,16 @@ public class ResubmitDocumentationService {
      * Anexa a documentação reenviada e devolve a demanda ao início do pipeline.
      *
      * @param resubmittedBy quem reenviou, registrado no histórico
+     * @param idempotencyKey opcional; com ela, reenviar a mesma requisição não reabre a demanda duas
+     *     vezes nem republica o evento
      * @throws LegalCaseNotFoundException se a demanda não existir
      * @throws com.lexflow.domain.exception.InvalidStatusTransitionException se a demanda não estiver
      *     devolvida para correção
      * @throws com.lexflow.domain.exception.UnsupportedDocumentFormatException se algum arquivo não
      *     estiver em um formato aceito
      */
-    public LegalCaseWithDocuments resubmit(UUID legalCaseId, List<DocumentUpload> uploads, String resubmittedBy) {
+    public LegalCaseWithDocuments resubmit(
+            UUID legalCaseId, List<DocumentUpload> uploads, String resubmittedBy, String idempotencyKey) {
         Objects.requireNonNull(legalCaseId, "legalCaseId não pode ser nulo");
         if (uploads == null || uploads.isEmpty()) {
             throw new IllegalArgumentException("é obrigatório enviar ao menos um arquivo");
@@ -115,6 +126,15 @@ public class ResubmitDocumentationService {
         LegalCase legalCase = legalCaseRepository
                 .findById(legalCaseId)
                 .orElseThrow(() -> new LegalCaseNotFoundException(legalCaseId));
+
+        String key = idempotencyKey == null || idempotencyKey.isBlank() ? null : idempotencyKey.strip();
+        if (key != null) {
+            Optional<IdempotentOperation> existing =
+                    idempotencyStore.reserve(IdempotencyNamespace.LEGAL_CASE_RESUBMISSION, key, legalCaseId);
+            if (existing.isPresent()) {
+                return replay(existing.get());
+            }
+        }
 
         // Os formatos são validados antes de qualquer gravação, como na ingestão.
         List<DocumentFormat> formats = storeDocumentsService.resolveFormats(uploads);
@@ -148,6 +168,9 @@ public class ResubmitDocumentationService {
                     .forEach(alertRepository::save);
             legalCaseRepository.save(transition.legalCase());
             statusHistoryRepository.save(transition.historyEntry());
+            if (key != null) {
+                idempotencyStore.markCompleted(IdempotencyNamespace.LEGAL_CASE_RESUBMISSION, key);
+            }
         });
 
         List<Document> allDocuments = documentRepository.findByLegalCaseId(legalCaseId);
@@ -160,5 +183,26 @@ public class ResubmitDocumentationService {
                 clock.instant()));
 
         return new LegalCaseWithDocuments(transition.legalCase(), allDocuments);
+    }
+
+    /** Reenvio sem chave de idempotência. */
+    public LegalCaseWithDocuments resubmit(UUID legalCaseId, List<DocumentUpload> uploads, String resubmittedBy) {
+        return resubmit(legalCaseId, uploads, resubmittedBy, null);
+    }
+
+    /**
+     * Devolve o estado deixado pela primeira requisição que usou esta chave.
+     *
+     * <p>Sem ela, um reenvio repetido — o clássico duplo clique — devolveria a demanda a
+     * {@code RECEIVED} uma segunda vez e republicaria o evento, fazendo o pipeline rodar duas vezes.
+     */
+    private LegalCaseWithDocuments replay(IdempotentOperation operation) {
+        if (!operation.completed()) {
+            throw new IdempotentRequestInProgressException(operation.idempotencyKey());
+        }
+        LegalCase legalCase = legalCaseRepository
+                .findById(operation.aggregateId())
+                .orElseThrow(() -> new LegalCaseNotFoundException(operation.aggregateId()));
+        return new LegalCaseWithDocuments(legalCase, documentRepository.findByLegalCaseId(operation.aggregateId()));
     }
 }

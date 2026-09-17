@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -47,6 +48,9 @@ public class KnowledgeBaseController {
 
     private static final String SOURCES_PATH = "/sources";
 
+    /** Mesmo cabeçalho de idempotência dos demais endpoints de escrita (seção 11). */
+    public static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+
     private final IngestKnowledgeBaseSourceService ingestionService;
     private final KnowledgeBaseRetriever retriever;
 
@@ -56,15 +60,22 @@ public class KnowledgeBaseController {
         this.retriever = retriever;
     }
 
-    /** Indexa uma fonte normativa enviada como texto. */
+    /**
+     * Indexa uma fonte normativa enviada como texto.
+     *
+     * <p>Aceita {@code Idempotency-Key}: reindexar a mesma norma custa uma chamada por trecho ao
+     * provedor de embeddings e a faria aparecer em duplicata na recuperação.
+     */
     @PostMapping(path = SOURCES_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<KnowledgeBaseSourceResponse> createFromText(
-            @RequestBody KnowledgeBaseSourceRequest request) {
+            @RequestBody KnowledgeBaseSourceRequest request,
+            @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
         KnowledgeBaseIngestionResult result = ingestionService.ingest(new IngestKnowledgeBaseSourceCommand(
                 request.title(),
                 KnowledgeBaseSourceType.of(request.sourceType()),
                 request.effectiveDate(),
-                request.text()));
+                request.text(),
+                idempotencyKey));
         return created(result);
     }
 
@@ -74,14 +85,16 @@ public class KnowledgeBaseController {
             @RequestParam("title") String title,
             @RequestParam("sourceType") String sourceType,
             @RequestParam(value = "effectiveDate", required = false) LocalDate effectiveDate,
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
         KnowledgeBaseIngestionResult result = ingestionService.ingest(new IngestKnowledgeBaseFileCommand(
                 title,
                 KnowledgeBaseSourceType.of(sourceType),
                 effectiveDate,
                 file.getOriginalFilename(),
                 file.getContentType(),
-                readBytes(file)));
+                readBytes(file),
+                idempotencyKey));
         return created(result);
     }
 

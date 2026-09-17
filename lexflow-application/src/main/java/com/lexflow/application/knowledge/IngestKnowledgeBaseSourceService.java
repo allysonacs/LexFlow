@@ -2,6 +2,10 @@ package com.lexflow.application.knowledge;
 
 import com.lexflow.application.document.DocumentTextExtractor;
 import com.lexflow.application.document.DocumentUpload;
+import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.application.idempotency.IdempotencyNamespace;
+import com.lexflow.application.idempotency.IdempotentOperation;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.pagination.PageQuery;
 import com.lexflow.application.pagination.PageResult;
 import com.lexflow.application.transaction.TransactionRunner;
@@ -16,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -49,6 +54,7 @@ public class IngestKnowledgeBaseSourceService {
     private final EmbeddingClientPort embeddingClient;
     private final TextChunker chunker;
     private final DocumentTextExtractor textExtractor;
+    private final IdempotentOperationStore idempotencyStore;
     private final TransactionRunner transactionRunner;
     private final Supplier<UUID> idGenerator;
 
@@ -58,6 +64,7 @@ public class IngestKnowledgeBaseSourceService {
             EmbeddingClientPort embeddingClient,
             TextChunker chunker,
             DocumentTextExtractor textExtractor,
+            IdempotentOperationStore idempotencyStore,
             TransactionRunner transactionRunner,
             Supplier<UUID> idGenerator) {
         this.sourceRepository = Objects.requireNonNull(sourceRepository, "sourceRepository não pode ser nulo");
@@ -65,6 +72,7 @@ public class IngestKnowledgeBaseSourceService {
         this.embeddingClient = Objects.requireNonNull(embeddingClient, "embeddingClient não pode ser nulo");
         this.chunker = Objects.requireNonNull(chunker, "chunker não pode ser nulo");
         this.textExtractor = Objects.requireNonNull(textExtractor, "textExtractor não pode ser nulo");
+        this.idempotencyStore = Objects.requireNonNull(idempotencyStore, "idempotencyStore não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
         this.idGenerator = Objects.requireNonNull(idGenerator, "idGenerator não pode ser nulo");
     }
@@ -79,7 +87,38 @@ public class IngestKnowledgeBaseSourceService {
         Objects.requireNonNull(command, "command não pode ser nulo");
         KnowledgeBaseSource source = new KnowledgeBaseSource(
                 idGenerator.get(), command.title(), command.sourceType(), command.effectiveDate());
-        return index(source, command.text(), false);
+
+        if (command.hasIdempotencyKey()) {
+            Optional<IdempotentOperation> existing = idempotencyStore.reserve(
+                    IdempotencyNamespace.KNOWLEDGE_BASE_SOURCE, command.idempotencyKey(), source.id());
+            if (existing.isPresent()) {
+                return replay(existing.get());
+            }
+        }
+
+        KnowledgeBaseIngestionResult result = index(source, command.text(), false);
+        if (command.hasIdempotencyKey()) {
+            idempotencyStore.markCompleted(IdempotencyNamespace.KNOWLEDGE_BASE_SOURCE, command.idempotencyKey());
+        }
+        return result;
+    }
+
+    /**
+     * Devolve a fonte indexada pela primeira requisição que usou esta chave.
+     *
+     * <p>Reindexar a mesma norma não é inofensivo: cada indexação custa uma chamada por trecho ao
+     * provedor de embeddings e, sem a chave, a mesma norma apareceria duas vezes na recuperação.
+     */
+    private KnowledgeBaseIngestionResult replay(IdempotentOperation operation) {
+        if (!operation.completed()) {
+            throw new IdempotentRequestInProgressException(operation.idempotencyKey());
+        }
+        KnowledgeBaseSource source = sourceRepository
+                .findById(operation.aggregateId())
+                .orElseThrow(() -> new KnowledgeBaseSourceNotFoundException(operation.aggregateId()));
+        List<KnowledgeBaseChunk> chunks = chunkRepository.findBySourceId(source.id());
+        return new KnowledgeBaseIngestionResult(
+                source, chunks.size(), chunks.stream().mapToInt(chunk -> chunk.content().length()).sum());
     }
 
     /**
@@ -93,7 +132,11 @@ public class IngestKnowledgeBaseSourceService {
     public KnowledgeBaseIngestionResult ingest(IngestKnowledgeBaseFileCommand command) {
         Objects.requireNonNull(command, "command não pode ser nulo");
         return ingest(new IngestKnowledgeBaseSourceCommand(
-                command.title(), command.sourceType(), command.effectiveDate(), textOf(command)));
+                command.title(),
+                command.sourceType(),
+                command.effectiveDate(),
+                textOf(command),
+                command.idempotencyKey()));
     }
 
     /**

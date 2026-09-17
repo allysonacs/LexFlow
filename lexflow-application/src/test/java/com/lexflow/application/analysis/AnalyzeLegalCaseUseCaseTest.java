@@ -11,6 +11,7 @@ import com.lexflow.application.knowledge.IngestKnowledgeBaseSourceCommand;
 import com.lexflow.application.knowledge.IngestKnowledgeBaseSourceService;
 import com.lexflow.application.knowledge.KnowledgeBaseRetriever;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles;
+import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryIdempotencyStore;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseChunkRepository;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.InMemoryKnowledgeBaseSourceRepository;
 import com.lexflow.application.knowledge.support.KnowledgeBaseTestDoubles.LexicalEmbeddingClient;
@@ -440,6 +441,7 @@ class AnalyzeLegalCaseUseCaseTest {
                         (format, content) -> {
                             throw new UnsupportedOperationException();
                         },
+                        new InMemoryIdempotencyStore(),
                         KnowledgeBaseTestDoubles.directTransactionRunner(),
                         UUID::randomUUID)
                 .ingest(new IngestKnowledgeBaseSourceCommand(

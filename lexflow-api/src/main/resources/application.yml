@@ -12,6 +12,14 @@ spring:
     url: ${LEXFLOW_DB_URL}
     username: ${LEXFLOW_DB_USERNAME}
     password: ${LEXFLOW_DB_PASSWORD}
+    hikari:
+      # Tempos limite explícitos também no banco (seção 11): sem eles, uma requisição fica presa
+      # indefinidamente esperando uma conexão quando o pool esgota ou o banco não responde.
+      connection-timeout: ${LEXFLOW_DB_CONNECTION_TIMEOUT:5000}
+      validation-timeout: 3000
+      # Uma conexão inutilizada por uma falha do banco não fica no pool para sempre.
+      max-lifetime: 1800000
+      keepalive-time: 300000
   jpa:
     hibernate:
       # O schema é do Flyway; o Hibernate apenas confere se as entidades batem com ele.
@@ -34,10 +42,15 @@ spring:
         default-requeue-rejected: false
         retry:
           enabled: true
-          max-attempts: ${LEXFLOW_RABBITMQ_MAX_ATTEMPTS:4}
-          initial-interval: 1s
-          multiplier: 2
-          max-interval: 10s
+          # A janela de novas tentativas precisa ser maior do que uma indisponibilidade típica de um
+          # provedor externo (Prompt 17). Com 6 tentativas e espera de 2s, 6s, 18s, 54s e 60s, o
+          # consumidor atravessa mais de dois minutos de queda do LLM sem mandar a demanda para a
+          # dead-letter. Em troca, a thread do consumidor fica ocupada durante esse tempo — por isso
+          # o paralelismo vem de mais consumidores, e não de uma janela menor.
+          max-attempts: ${LEXFLOW_RABBITMQ_MAX_ATTEMPTS:6}
+          initial-interval: ${LEXFLOW_RABBITMQ_RETRY_INITIAL:2s}
+          multiplier: 3
+          max-interval: 60s
     template:
       retry:
         # Backoff também na publicação: um broker momentaneamente indisponível não pode
@@ -105,6 +118,18 @@ lexflow:
     retrieval-limit: ${LEXFLOW_KB_RETRIEVAL_LIMIT:5}
     # Trechos menos próximos que isso são descartados: norma irrelevante no contexto convida à alucinação.
     min-similarity: ${LEXFLOW_KB_MIN_SIMILARITY:0.2}
+  # Idempotência dos endpoints de escrita e do consumo da fila (seção 11).
+  idempotency:
+    # Por quanto tempo uma chave já processada continua sendo reconhecida como repetição. Precisa ser
+    # maior do que a janela de novas tentativas de qualquer cliente: apagada a chave, um reenvio muito
+    # atrasado voltaria a criar a demanda.
+    retention: ${LEXFLOW_IDEMPOTENCY_RETENTION:30d}
+    cleanup:
+      enabled: ${LEXFLOW_IDEMPOTENCY_CLEANUP_ENABLED:true}
+      # Uma vez por hora é suficiente: a tabela cresce na velocidade das demandas, não das requisições.
+      interval: ${LEXFLOW_IDEMPOTENCY_CLEANUP_INTERVAL:1h}
+      # Remoção em lotes, para a limpeza não segurar um bloqueio longo sobre a tabela.
+      batch-size: ${LEXFLOW_IDEMPOTENCY_CLEANUP_BATCH:1000}
   # Etapas do pipeline assíncrono.
   pipeline:
     fact-extraction:
@@ -160,6 +185,19 @@ resilience4j:
           - com.lexflow.application.llm.LlmUnavailableException
           - java.util.concurrent.TimeoutException
           - io.github.resilience4j.bulkhead.BulkheadFullException
+      storage:
+        # Falha de storage é quase sempre transitória (rede, throttling do S3). O SDK não repete: quem
+        # repete é aqui, para o tempo total de uma falha ser previsível.
+        max-attempts: ${LEXFLOW_STORAGE_MAX_ATTEMPTS:3}
+        wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        exponential-max-wait-duration: 5s
+        retry-exceptions:
+          - com.lexflow.application.exception.DocumentStorageException
+        # Objeto inexistente é resposta do serviço, não falha dele: repetir não o faria aparecer.
+        ignore-exceptions:
+          - com.lexflow.application.exception.DocumentNotFoundInStorageException
       embeddings:
         max-attempts: ${LEXFLOW_EMBEDDINGS_MAX_ATTEMPTS:3}
         wait-duration: 1s
@@ -190,6 +228,20 @@ resilience4j:
         ignore-exceptions:
           - com.lexflow.application.llm.LlmRequestRejectedException
           - io.github.resilience4j.bulkhead.BulkheadFullException
+      storage:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 10s
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: ${LEXFLOW_STORAGE_CIRCUIT_OPEN_WAIT:15s}
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - com.lexflow.application.exception.DocumentStorageException
+        ignore-exceptions:
+          - com.lexflow.application.exception.DocumentNotFoundInStorageException
       embeddings:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 20

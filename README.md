@@ -43,8 +43,9 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 14 | Segunda checagem (self-verification) | concluído |
 | 15 | API de revisão humana e decisão | concluído |
 | 16 | Log de auditoria imutável | concluído |
-| 17 | Revisão de resiliência e idempotência | próximo |
-| 18–19 | Observabilidade e dataset de regressão | pendentes |
+| 17 | Revisão de resiliência e idempotência, com runbook | concluído |
+| 18 | Observabilidade e métricas de qualidade da IA | próximo |
+| 19 | Dataset de regressão de prompts | pendente |
 
 Hoje o fluxo está completo da ingestão à decisão humana:
 
@@ -478,6 +479,28 @@ curl -X POST http://localhost:8080/api/v1/legal-cases/$ID/decisions \
 
 **Só metadados.** O payload registra status, tipo de decisão, `question_key`, confiança e identificadores. Nunca conteúdo de documento, texto de resposta ou comentário de decisão (seção 12).
 
+### Resiliência e idempotência (todo o sistema)
+
+Uma revisão ponta a ponta das integrações externas, com o detalhe operacional em
+[`docs/resilience-runbook.md`](docs/resilience-runbook.md).
+
+| Integração | Tempo limite | Retry | Circuit breaker |
+|---|---|---|---|
+| LLM (`llm`) | 180 s por tentativa | 3 tentativas, 2 s → 20 s | Janela 20, 30 s aberto |
+| Embeddings (`embeddings`) | 45 s por tentativa | 3 tentativas, 1 s → 10 s | Janela 20, 30 s aberto |
+| Storage (`storage`) | 30 s por chamada, 10 s por tentativa | 3 tentativas, 500 ms → 5 s | Janela 20, 15 s aberto |
+| Banco | 5 s para obter conexão, 3 s de validação | — | — (o pool recicla conexões) |
+| Fila | — | Publicação: 3 tentativas; consumo: 6 tentativas, 2 s → 60 s | Dead-letter por fila |
+
+**O que a revisão encontrou e corrigiu:**
+
+- **O storage tinha só tempos limite.** Com o S3 fora do ar, cada upload esperava o limite inteiro antes de falhar, e uma rajada de ingestões prendia threads até esgotá-las. Ganhou retry e circuit breaker — e as tentativas próprias do SDK da AWS foram desligadas, porque duas camadas de retry multiplicam as chamadas e tornam imprevisível o tempo total de uma falha.
+- **A janela de tentativas do consumidor era curta demais.** Eram ~7 segundos: menos do que uma queda típica de provedor externo, o que mandava para a dead-letter demandas que teriam se resolvido sozinhas. Agora são 6 tentativas, de 2 s a 60 s — mais de dois minutos. Em troca, a thread do consumidor fica ocupada nesse tempo; o paralelismo vem de mais consumidores.
+- **`processing_events` crescia para sempre.** Um job horário remove, em lotes, as chaves já processadas com mais de 30 dias. Eventos falhos e em andamento nunca são removidos.
+- **Nem todo endpoint de escrita aceitava `Idempotency-Key`.** Hoje aceitam a ingestão, a decisão, o reenvio de documentação e a indexação de fonte normativa. O CRUD de regras de checklist não precisa: a unicidade é do próprio dado.
+
+**Testes de caos** (`PipelineChaosIT`): o provedor de LLM cai, volta, e a demanda retoma sozinha — sem dead-letter e sem processar nada duas vezes; com o consumidor fora do ar, as demandas esperam na fila e são processadas quando ele volta. A queda do banco não é automatizada, porque pausar o container derrubaria o contexto Spring compartilhado por toda a suíte; o comportamento esperado está no runbook.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -662,7 +685,13 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_RABBITMQ_USERNAME` / `_PASSWORD` | Credenciais do broker |
 | `LEXFLOW_RABBITMQ_VHOST` | Virtual host (padrão `/`) |
 | `LEXFLOW_RABBITMQ_CONCURRENCY` / `_MAX_CONCURRENCY` | Consumidores por réplica (padrão `2`–`8`) |
-| `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `4`) |
+| `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `6`) |
+| `LEXFLOW_RABBITMQ_RETRY_INITIAL` | Espera antes da segunda tentativa (padrão `2s`; o backoff triplica até `60s`) |
+| `LEXFLOW_DB_CONNECTION_TIMEOUT` | Tempo máximo para obter uma conexão do pool, em ms (padrão `5000`) |
+| `LEXFLOW_STORAGE_MAX_ATTEMPTS` | Tentativas por operação de storage (padrão `3`) |
+| `LEXFLOW_STORAGE_CIRCUIT_OPEN_WAIT` | Tempo com o circuito do storage aberto (padrão `15s`) |
+| `LEXFLOW_IDEMPOTENCY_RETENTION` | Por quanto tempo uma chave processada continua sendo reconhecida (padrão `30d`) |
+| `LEXFLOW_IDEMPOTENCY_CLEANUP_ENABLED` / `_INTERVAL` / `_BATCH` | Job de expiração das chaves (padrão ligado, `1h`, `1000`) |
 | `LEXFLOW_ADMIN_USERNAME` | Usuário da API administrativa (padrão `admin` no perfil `dev`; obrigatório em `prod`) |
 | `LEXFLOW_ADMIN_PASSWORD` | Senha da API administrativa, em texto ou `{bcrypt}...` (padrão `lexflow-admin` no perfil `dev`; obrigatória em `prod`) |
 | `ANTHROPIC_API_KEY` | Chave da API da Anthropic; sem ela, as chamadas ao LLM falham, mas a aplicação sobe |
@@ -705,4 +734,5 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 ## Documentação
 
 - `docs/00-knowledge-base.md`: base de conhecimento do sistema
+- `docs/resilience-runbook.md`: pontos de falha conhecidos, o que acontece em cada um e como recuperar
 - `files/`: prompts de implementação, de `01` a `19`, a serem executados em ordem

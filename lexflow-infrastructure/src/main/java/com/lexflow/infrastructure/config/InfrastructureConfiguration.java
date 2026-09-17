@@ -3,9 +3,16 @@ package com.lexflow.infrastructure.config;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
-/** Beans de apoio compartilhados pelos adapters de infraestrutura. */
+/**
+ * Beans de apoio compartilhados pelos adapters de infraestrutura.
+ *
+ * <p>O agendamento é habilitado aqui por causa da expiração das chaves de idempotência (Prompt 17):
+ * é a única tarefa periódica do sistema, e ela é manutenção — nada do fluxo de negócio depende dela.
+ */
 @Configuration(proxyBeanMethods = false)
+@EnableScheduling
 public class InfrastructureConfiguration {
 
     /**

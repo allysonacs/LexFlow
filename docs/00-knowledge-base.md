@@ -356,9 +356,11 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - Paginação obrigatória em qualquer endpoint de listagem.
 
 **Resiliência**
-- Toda chamada externa (LLM, storage, fila) protegida por circuit breaker + retry com backoff exponencial (Resilience4j).
-- Timeouts explícitos em todas as integrações externas.
+- Toda chamada externa (LLM, embeddings, storage, fila, banco) protegida por tempo limite explícito, retry com backoff exponencial e circuit breaker onde aplicável (Resilience4j). Instâncias: `llm`, `embeddings` e `storage`.
+- Quem repete é sempre o Resilience4j: as tentativas próprias das bibliotecas clientes (SDK da AWS) foram desligadas, porque duas camadas de retry multiplicam as chamadas e tornam imprevisível o tempo total de uma falha.
 - Falha em uma demanda não pode travar o processamento de outras (isolamento por bulkhead/thread pool dedicado).
+- A janela de novas tentativas do consumidor precisa ser maior do que uma indisponibilidade típica de um provedor externo: 6 tentativas, com espera de 2 s a 60 s, atravessam mais de dois minutos de queda sem mandar a demanda para a dead-letter (Prompt 17).
+- O detalhe operacional de cada ponto de falha está em `docs/resilience-runbook.md`.
 
 **Idempotência**
 - Toda mensagem consumida da fila carrega uma `idempotency_key`.
@@ -367,6 +369,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - A chave do cliente vem no cabeçalho `Idempotency-Key` e é gravada em `processing_events` com o prefixo do seu escopo (`IdempotencyNamespace`): `legal-case-ingestion:` na ingestão e `legal-case-decision:` na decisão humana. O prefixo é o que impede que a mesma chave, usada em dois endpoints ou por uma mensagem de fila, seja confundida com uma repetição. Um reenvio com a mesma chave devolve `201` com o resultado original.
 - A chave de um evento de fila é derivada do próprio evento (`LEGAL_CASE_RECEIVED:{eventId}`), e não da chave enviada pelo cliente.
 - Estados de um evento em `processing_events`: `IN_PROGRESS`, `PROCESSED` ou `FAILED`. Um evento `FAILED` pode ser reservado de novo, e um `IN_PROGRESS` em outra réplica é descartado.
+- As chaves já processadas expiram depois de `lexflow.idempotency.retention` (padrão 30 dias), removidas por um job horário em lotes. A retenção precisa ser maior do que a janela de novas tentativas de qualquer cliente: apagada a chave, um reenvio muito atrasado voltaria a criar a demanda. Eventos `FAILED` e `IN_PROGRESS` nunca são removidos.
 - A marca de falha é gravada fora da transação do processamento, porque um rollback apagaria o próprio registro da falha.
 
 **Etapas retomáveis**
@@ -588,3 +591,10 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
   - `AuditingDecisionRepository`: cada decisão humana, sem o comentário.
 - **Consulta.** `GET /api/v1/legal-cases/{id}/audit-log` devolve a linha do tempo completa, da ação mais antiga para a mais recente. Uma demanda inexistente responde `404`, para que trilha vazia e demanda inexistente não se confundam.
 - **Limite conhecido.** A decisão e a transição que ela provoca ocorrem na mesma transação e no mesmo instante: a ordem entre essas duas linhas não é determinística.
+
+**Resiliência e idempotência (Prompt 17)**
+- **O que faltava e foi acrescentado:** o storage tinha só tempos limite — ganhou retry e circuit breaker na instância `storage`, com as tentativas do SDK da AWS desligadas; o pool do banco ganhou tempos limite explícitos; a janela de novas tentativas do consumidor passou de ~7 s para mais de dois minutos, porque a anterior era menor que uma queda típica de provedor externo; e `processing_events` ganhou expiração.
+- **Idempotência em todo endpoint de escrita que pode ser re-chamado:** ingestão, decisão, reenvio de documentação e indexação de fonte normativa. O CRUD de regras de checklist não usa chave porque a unicidade é do próprio dado (`case_type` + `required_document_type`).
+- **Escopo da chave.** Todas convivem em um índice único só; o prefixo do `IdempotencyNamespace` é o que impede que a mesma chave, usada em dois endpoints, seja confundida com uma repetição.
+- **Testes de caos.** `PipelineChaosIT` prova o critério de aceite: o LLM cai, volta, e a demanda retoma sozinha, sem dead-letter e sem processar nada duas vezes. A queda do banco não é automatizada — pausar o container derrubaria o contexto Spring compartilhado por toda a suíte —, e o comportamento esperado está no runbook.
+- **Runbook.** `docs/resilience-runbook.md` lista cada ponto de falha, o que acontece, quando um operador precisa agir e como republicar mensagens da dead-letter.

@@ -16,7 +16,13 @@ public enum IdempotencyNamespace {
     LEGAL_CASE_INGESTION("legal-case-ingestion:", "LEGAL_CASE_INGESTION_REQUEST"),
 
     /** Registro da decisão humana (Prompt 15). */
-    LEGAL_CASE_DECISION("legal-case-decision:", "LEGAL_CASE_DECISION_REQUEST");
+    LEGAL_CASE_DECISION("legal-case-decision:", "LEGAL_CASE_DECISION_REQUEST"),
+
+    /** Reenvio de documentação de uma demanda devolvida (Prompt 15). */
+    LEGAL_CASE_RESUBMISSION("legal-case-resubmission:", "LEGAL_CASE_RESUBMISSION_REQUEST"),
+
+    /** Indexação de uma fonte normativa (Prompt 12). */
+    KNOWLEDGE_BASE_SOURCE("knowledge-base-source:", "KNOWLEDGE_BASE_SOURCE_REQUEST");
 
     private final String prefix;
     private final String eventType;

@@ -86,6 +86,7 @@ public class ReviewConfiguration {
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             StoreDocumentsService storeDocumentsService,
+            IdempotentOperationStore idempotencyStore,
             LegalCaseReceivedEventPublisher eventPublisher,
             TransactionRunner transactionRunner,
             Clock clock) {
@@ -97,6 +98,7 @@ public class ReviewConfiguration {
                 statusTransitionService,
                 statusHistoryRepository,
                 storeDocumentsService,
+                idempotencyStore,
                 eventPublisher,
                 transactionRunner,
                 clock,

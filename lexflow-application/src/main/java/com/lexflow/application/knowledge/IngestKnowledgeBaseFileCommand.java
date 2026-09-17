@@ -11,6 +11,7 @@ import java.util.Objects;
  * usado nos documentos das demandas, inclusive com OCR quando a norma chega digitalizada.
  *
  * @param declaredMimeType tipo declarado pelo cliente; a extensão é que decide o formato
+ * @param idempotencyKey opcional; com ela, reenviar a mesma norma não a indexa duas vezes
  */
 public record IngestKnowledgeBaseFileCommand(
         String title,
@@ -18,7 +19,8 @@ public record IngestKnowledgeBaseFileCommand(
         LocalDate effectiveDate,
         String fileName,
         String declaredMimeType,
-        byte[] content) {
+        byte[] content,
+        String idempotencyKey) {
 
     public IngestKnowledgeBaseFileCommand {
         Objects.requireNonNull(sourceType, "sourceType não pode ser nulo");
@@ -32,6 +34,18 @@ public record IngestKnowledgeBaseFileCommand(
         if (content.length == 0) {
             throw new IllegalArgumentException("arquivo '%s' está vazio".formatted(fileName));
         }
+        idempotencyKey = idempotencyKey == null || idempotencyKey.isBlank() ? null : idempotencyKey.strip();
+    }
+
+    /** Pedido sem chave de idempotência. */
+    public IngestKnowledgeBaseFileCommand(
+            String title,
+            KnowledgeBaseSourceType sourceType,
+            LocalDate effectiveDate,
+            String fileName,
+            String declaredMimeType,
+            byte[] content) {
+        this(title, sourceType, effectiveDate, fileName, declaredMimeType, content, null);
     }
 
     @Override

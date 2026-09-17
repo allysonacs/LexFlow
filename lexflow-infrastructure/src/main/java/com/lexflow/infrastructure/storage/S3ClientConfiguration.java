@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.awscore.retry.AwsRetryStrategy;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -41,6 +42,10 @@ public class S3ClientConfiguration {
                 .overrideConfiguration(ClientOverrideConfiguration.builder()
                         .apiCallTimeout(API_CALL_TIMEOUT)
                         .apiCallAttemptTimeout(API_CALL_ATTEMPT_TIMEOUT)
+                        // Quem repete é o Resilience4j, no decorador da porta de storage (Prompt 17).
+                        // Somar as tentativas do SDK às dele multiplicaria as chamadas e tornaria o
+                        // tempo total de uma falha imprevisível.
+                        .retryStrategy(AwsRetryStrategy.doNotRetry())
                         .build());
 
         if (properties.hasCustomEndpoint()) {

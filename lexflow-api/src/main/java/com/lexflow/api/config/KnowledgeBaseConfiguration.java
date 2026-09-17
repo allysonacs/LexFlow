@@ -1,6 +1,7 @@
 package com.lexflow.api.config;
 
 import com.lexflow.application.document.DocumentTextExtractor;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.knowledge.EmbeddingClientPort;
 import com.lexflow.application.knowledge.IngestKnowledgeBaseSourceService;
 import com.lexflow.application.knowledge.KnowledgeBaseChunkRepository;
@@ -43,6 +44,7 @@ public class KnowledgeBaseConfiguration {
             EmbeddingClientPort embeddingClient,
             TextChunker knowledgeBaseTextChunker,
             DocumentTextExtractor textExtractor,
+            IdempotentOperationStore idempotencyStore,
             TransactionRunner transactionRunner) {
         return new IngestKnowledgeBaseSourceService(
                 sourceRepository,
@@ -50,6 +52,7 @@ public class KnowledgeBaseConfiguration {
                 embeddingClient,
                 knowledgeBaseTextChunker,
                 textExtractor,
+                idempotencyStore,
                 transactionRunner,
                 UUID::randomUUID);
     }

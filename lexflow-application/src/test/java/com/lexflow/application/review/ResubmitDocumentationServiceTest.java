@@ -12,6 +12,7 @@ import com.lexflow.application.legalcase.LegalCaseWithDocuments;
 import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.InMemoryLegalCaseAlertRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.DirectTransactionRunner;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryDocumentRepository;
+import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryIdempotencyStore;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryLegalCaseRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryStatusHistoryRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.RecordingDocumentStorage;
@@ -55,6 +56,7 @@ class ResubmitDocumentationServiceTest {
     private InMemoryLegalCaseAlertRepository alertRepository;
     private InMemoryStatusHistoryRepository historyRepository;
     private RecordingDocumentStorage storage;
+    private InMemoryIdempotencyStore idempotencyStore;
     private RecordingEventPublisher eventPublisher;
     private ResubmitDocumentationService service;
 
@@ -68,6 +70,7 @@ class ResubmitDocumentationServiceTest {
         alertRepository = new InMemoryLegalCaseAlertRepository();
         historyRepository = new InMemoryStatusHistoryRepository();
         storage = new RecordingDocumentStorage();
+        idempotencyStore = new InMemoryIdempotencyStore();
         eventPublisher = new RecordingEventPublisher();
         service = new ResubmitDocumentationService(
                 legalCaseRepository,
@@ -77,6 +80,7 @@ class ResubmitDocumentationServiceTest {
                 new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids),
                 historyRepository,
                 new StoreDocumentsService(storage, ids),
+                idempotencyStore,
                 eventPublisher,
                 new DirectTransactionRunner(),
                 clock,
@@ -178,6 +182,23 @@ class ResubmitDocumentationServiceTest {
         assertThat(storage.objectCount()).isZero();
         assertThat(legalCaseRepository.findById(legalCase.id()).orElseThrow().status())
                 .isEqualTo(LegalCaseStatus.RETURNED_FOR_CORRECTION);
+    }
+
+    @Test
+    @DisplayName("com a mesma chave de idempotência, o reenvio repetido não reabre a demanda duas vezes")
+    void shouldNotReopenTwiceWithTheSameIdempotencyKey() {
+        LegalCase legalCase = givenReturnedCase();
+        List<DocumentUpload> uploads = List.of(upload("parecer.pdf", "conteúdo"));
+
+        LegalCaseWithDocuments first = service.resubmit(legalCase.id(), uploads, "requisitante", "chave-1");
+        LegalCaseWithDocuments second = service.resubmit(legalCase.id(), uploads, "requisitante", "chave-1");
+
+        assertThat(first.legalCase().status()).isEqualTo(LegalCaseStatus.RECEIVED);
+        assertThat(second.legalCase().status()).isEqualTo(LegalCaseStatus.RECEIVED);
+        // Sem a chave, a segunda chamada seria recusada pela máquina de estados — ou, pior, reabriria
+        // a demanda de novo e faria o pipeline rodar duas vezes.
+        assertThat(eventPublisher.published()).hasSize(1);
+        assertThat(documentRepository.findByLegalCaseId(legalCase.id())).hasSize(1);
     }
 
     @Test

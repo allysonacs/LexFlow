@@ -17,11 +17,15 @@ import com.lexflow.domain.knowledge.KnowledgeBaseChunk;
 import com.lexflow.domain.knowledge.KnowledgeBaseSourceType;
 import com.lexflow.domain.knowledge.TextChunker;
 import com.lexflow.infrastructure.persistence.adapter.KnowledgeBaseChunkRepositoryAdapter;
+import com.lexflow.infrastructure.persistence.adapter.ProcessingEventIdempotencyAdapter;
 import com.lexflow.infrastructure.persistence.adapter.KnowledgeBaseSourceRepositoryAdapter;
 import com.lexflow.infrastructure.persistence.repository.KnowledgeBaseChunkJpaRepository;
 import com.lexflow.infrastructure.persistence.repository.KnowledgeBaseSourceJpaRepository;
+import com.lexflow.infrastructure.persistence.repository.ProcessingEventJpaRepository;
 import com.lexflow.infrastructure.testsupport.LexicalEmbeddingClient;
 import jakarta.persistence.EntityManager;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.List;
@@ -74,6 +78,12 @@ class KnowledgeBaseRetrievalIT extends AbstractPersistenceIT {
     @Autowired
     private EntityManager entityManager;
 
+    @Autowired
+    private ProcessingEventJpaRepository processingEventRepository;
+
+    /** Relógio fixo: nenhum teste aqui depende do horário, e a chave de idempotência não é usada. */
+    private static final Instant NOW_CLOCK = Instant.parse("2026-03-10T12:00:00Z");
+
     private KnowledgeBaseSourceRepository sourceRepository;
     private KnowledgeBaseChunkRepository chunkRepository;
     private IngestKnowledgeBaseSourceService ingestionService;
@@ -92,6 +102,7 @@ class KnowledgeBaseRetrievalIT extends AbstractPersistenceIT {
                 embeddingClient,
                 new TextChunker(ChunkingPolicy.DEFAULT),
                 unusedExtractor(),
+                new ProcessingEventIdempotencyAdapter(processingEventRepository, Clock.fixed(NOW_CLOCK, java.time.ZoneOffset.UTC)),
                 directTransactionRunner(),
                 UUID::randomUUID);
         retriever = new KnowledgeBaseRetriever(embeddingClient, chunkRepository, 3, 0.0);

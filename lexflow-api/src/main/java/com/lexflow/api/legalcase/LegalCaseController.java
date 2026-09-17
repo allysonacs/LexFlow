@@ -212,9 +212,10 @@ public class LegalCaseController {
             @PathVariable("id") UUID id,
             @RequestParam("files") List<MultipartFile> files,
             @RequestParam(value = "documentTypes", required = false) List<String> documentTypes,
-            @RequestHeader(value = USER_ID_HEADER, required = false) String userId) {
+            @RequestHeader(value = USER_ID_HEADER, required = false) String userId,
+            @RequestHeader(value = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey) {
         return LegalCaseDetailResponse.from(
-                resubmitDocumentationService.resubmit(id, toUploads(files, documentTypes), userId));
+                resubmitDocumentationService.resubmit(id, toUploads(files, documentTypes), userId, idempotencyKey));
     }
 
     /**
