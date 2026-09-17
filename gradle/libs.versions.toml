@@ -7,6 +7,13 @@ awssdk = "2.54.19"
 # Apache Tika: extração de texto (nativo e OCR via Tesseract). A linha 4.x mudou a API de
 # configuração e ainda é recente demais; a 3.x é a estável.
 tika = "3.3.2"
+# Resilience4j: circuit breaker, retry e time limiter do cliente LLM (Prompt 10).
+resilience4j = "2.4.0"
+# Validação das respostas estruturadas do LLM. A linha 1.5 usa o Jackson 2, o mesmo do Spring Boot 3.5;
+# as linhas 2.x e 3.x mudaram a API, e a 3.x já exige o Jackson 3.
+json-schema-validator = "1.5.9"
+# Dublê HTTP do provedor de LLM nos testes. O artefato standalone embute o próprio Jetty.
+wiremock = "3.13.2"
 
 [libraries]
 # BOM do Spring Boot: centraliza as versões de Spring, JUnit, Testcontainers etc.
@@ -17,6 +24,8 @@ spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-start
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
 spring-boot-starter-data-jpa = { module = "org.springframework.boot:spring-boot-starter-data-jpa" }
 spring-boot-starter-security = { module = "org.springframework.boot:spring-boot-starter-security" }
+spring-boot-starter-webflux = { module = "org.springframework.boot:spring-boot-starter-webflux" }
+spring-boot-starter-aop = { module = "org.springframework.boot:spring-boot-starter-aop" }
 spring-boot-starter-amqp = { module = "org.springframework.boot:spring-boot-starter-amqp" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
 spring-boot-test = { module = "org.springframework.boot:spring-boot-test" }
@@ -33,6 +42,10 @@ tika-core = { module = "org.apache.tika:tika-core" }
 tika-parser-pdf = { module = "org.apache.tika:tika-parser-pdf-module" }
 tika-parser-microsoft = { module = "org.apache.tika:tika-parser-microsoft-module" }
 tika-parser-ocr = { module = "org.apache.tika:tika-parser-ocr-module" }
+resilience4j-spring-boot3 = { module = "io.github.resilience4j:resilience4j-spring-boot3", version.ref = "resilience4j" }
+resilience4j-reactor = { module = "io.github.resilience4j:resilience4j-reactor", version.ref = "resilience4j" }
+json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }
+wiremock-standalone = { module = "org.wiremock:wiremock-standalone", version.ref = "wiremock" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind" }
 # Serialização de java.time nos eventos da fila; declarado por vir, de outro modo, só por transitividade.
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310" }

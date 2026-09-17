@@ -246,8 +246,8 @@ Regra: `domain` não depende de nenhum framework. `application` depende só de `
 - **Mensageria:** RabbitMQ (via Spring AMQP), escolhido no Prompt 07 por simplicidade operacional. A justificativa está na seção 14.
 - **Storage de arquivos:** S3 em produção e MinIO em desenvolvimento e nos testes, via AWS SDK v2
 - **Extração de texto:** Apache Tika 3.x, com o Tesseract para OCR (idioma `por`). O Tesseract é um executável externo e precisa estar instalado no ambiente de execução.
-- **Cliente HTTP para LLM:** WebClient (Spring) ou HTTP client nativo do Java 21
-- **Resiliência:** Resilience4j (circuit breaker, retry, timeout, bulkhead)
+- **Cliente HTTP para LLM:** `WebClient` (Spring WebFlux, só como cliente; o servidor continua sendo o Tomcat), chamando a Messages API da Anthropic (`POST /v1/messages`). O modelo padrão é `claude-opus-5`.
+- **Resiliência:** Resilience4j (circuit breaker, retry, timeout, bulkhead), configurado em `resilience4j.*.instances.<nome>` no `application.yml`
 - **Observabilidade:** Micrometer + OpenTelemetry
 - **Testes:** JUnit 5, AssertJ, Awaitility e Testcontainers (PostgreSQL com pgvector, RabbitMQ, MinIO). Os testes de OCR exigem o Tesseract instalado.
 - **Cobertura:** JaCoCo, com a verificação de 80% de `domain` e `application` rodando no `./gradlew build`
@@ -371,7 +371,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 
 ---
 
-## 14. Decisões de implementação registradas (Prompts 01 a 09)
+## 14. Decisões de implementação registradas (Prompts 01 a 10)
 
 Esta seção consolida as decisões tomadas durante a implementação que não constavam das seções anteriores. Qualquer mudança deve ser registrada aqui antes de ser implementada.
 
@@ -445,3 +445,28 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
   - `GET/POST /api/v1/admin/checklist-rules` e `GET/PUT/DELETE /api/v1/admin/checklist-rules/{id}`.
 - Listagens são paginadas com `page` (a partir de 0) e `size` (padrão 20, máximo 100). A resposta traz `content`, `page`, `size`, `totalElements` e `totalPages`.
 - Os documentos de uma demanda são lidos em ordem estável (data de envio, nome, identificador), porque a ordem decide qual documento satisfaz um item.
+
+**Cliente LLM (Prompt 10)**
+- **Porta.** `LlmClientPort` fica em `lexflow-application.llm` e é genérica: `complete(LlmRequest): LlmResponse`, sem nenhuma regra jurídica.
+  - `LlmRequest` traz o prompt de sistema, o prompt, o JSON Schema opcional, o modelo, `maxTokens`, `temperature` e `effort`.
+  - `LlmResponse` traz o modelo pedido e o que respondeu, o texto, o JSON validado, o `stop_reason`, o uso de tokens, o `request-id` e a latência.
+- **Adapter.** `AnthropicMessagesClient`, em `lexflow-infrastructure.llm`, chama a API por `WebClient`, sem o SDK: o Prompt 10 pede `WebClient` e testes com WireMock, e as proteções ficam todas no Resilience4j, sem somar novas tentativas do SDK às do Resilience4j.
+- **Requisição.** Cabeçalhos `x-api-key` e `anthropic-version: 2023-06-01`. A resposta estruturada é pedida em `output_config.format` (`type: json_schema`) e o esforço em `output_config.effort`.
+- **Modelo e parâmetros.** O modelo padrão é `claude-opus-5`, com `max_tokens` padrão de 16000 (as chamadas não usam streaming). O Claude Opus 5 recusa `temperature`; o ajuste de qualidade é o `effort`.
+- **Recusa por política.** Ligada por padrão: `fallbacks: "default"` com o beta `server-side-fallback-2026-07-01`, para o provedor tentar outro modelo na mesma chamada. O modelo que respondeu é sempre o registrado como `model_version`.
+- **Validação.** A resposta estruturada é validada de novo no cliente (JSON Schema 2020-12, `networknt/json-schema-validator` 1.5, com Jackson 2). Resposta que não é JSON, viola o schema ou foi truncada (`stop_reason: max_tokens`) vira `LlmResponseValidationException`, sem nova tentativa: a decisão de tentar de novo com prompt reforçado é do caso de uso (Prompt 11). `stop_reason: refusal` vira `LlmRefusalException`.
+- **Proteções**, na instância `llm`, de dentro para fora:
+
+  | Proteção | Padrão |
+  |---|---|
+  | Bulkhead | 16 chamadas simultâneas por réplica, espera de 10 s |
+  | Time limiter | 180 s por tentativa (o timeout HTTP é de 190 s) |
+  | Circuit breaker | janela de 20 chamadas; abre com 50% de falhas ou 80% de chamadas acima de 120 s; fica 30 s aberto |
+  | Retry | 3 tentativas, com backoff exponencial de 2 s a 20 s |
+
+- **Classificação das falhas.**
+  - Repetidas e contadas pelo circuito: 408, 409, 429, 5xx, 529, timeout e falha de conexão (`LlmUnavailableException`).
+  - Não repetidas e não contadas: os demais 4xx (`LlmRequestRejectedException`), a validação e a recusa.
+  - Circuito aberto e bulkhead cheio também viram `LlmUnavailableException`.
+- **Log.** O prompt e a resposta nunca vão para o log. Em `INFO` saem modelo, tokens, latência e `request-id`; em `DEBUG`, só o tamanho e o hash do prompt.
+- **Chave de API.** Vem de `ANTHROPIC_API_KEY`. Sem ela, a aplicação sobe e só as chamadas falham.

@@ -16,6 +16,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - RabbitMQ para o processamento assíncrono, via Spring AMQP
 - Apache Tika 3.3 para extrair texto, com o Tesseract 5 para o OCR
 - Spring Security (HTTP Basic) para a API administrativa
+- Claude (Messages API da Anthropic) como LLM, chamado por `WebClient`, com Resilience4j (retry, circuit breaker, time limiter e bulkhead)
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -34,8 +35,9 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 07 | Fila e orquestração assíncrona (RabbitMQ, retry, dead-letter) | concluído |
 | 08 | Classificação determinística e extração de texto (Tika + Tesseract) | concluído |
 | 09 | Checklist documental determinístico, com API administrativa das regras | concluído |
-| 10 | Cliente LLM | próximo |
-| 11–19 | Extração de fatos, RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 10 | Cliente LLM isolado e resiliente (Messages API da Anthropic) | concluído |
+| 11 | Extração estruturada de fatos via LLM | próximo |
+| 12–19 | RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
 Hoje o pipeline vai da ingestão até o checklist avaliado e o texto extraído, sem nenhuma chamada a LLM:
 
@@ -100,7 +102,8 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - **`ExtractDocumentTextService`** extrai o texto de cada documento de uma demanda e pula os que já foram lidos.
 - **`DocumentChecklistService`** gera e avalia o checklist documental e responde à consulta. **`ManageChecklistRulesService`** é o CRUD das regras. Detalhes em [Checklist documental](#checklist-documental-lexflow-application-e-lexflow-api).
 - `PageQuery` e `PageResult` dão paginação às listagens sem depender do Spring Data.
-- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `ChecklistRuleRepository`, `DocumentChecklistItemRepository`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
+- **`LlmClientPort`** é a porta genérica para o LLM: recebe um `LlmRequest` e devolve um `LlmResponse` já validado. Ela não conhece nenhuma regra jurídica (ver [Cliente LLM](#cliente-llm-lexflow-infrastructure)).
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `ChecklistRuleRepository`, `DocumentChecklistItemRepository`, `LlmClientPort`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
@@ -282,6 +285,50 @@ Só `/api/v1/admin/**` exige autenticação: HTTP Basic, com o papel `ADMIN`, se
 
 > **Limitação conhecida.** As demais rotas continuam abertas. O controle de acesso por papel da seção 12 (`ANALYST`, `LEGAL_REVIEWER`, `ADMIN`) depende da escolha do provedor de identidade e fica contido na `SecurityConfiguration`.
 
+### Cliente LLM (`lexflow-infrastructure`)
+
+`AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. Ainda não há caso de uso que o chame; o primeiro será a extração de fatos (Prompt 11).
+
+```java
+LlmResponse response = llmClient.complete(LlmRequest.structured(
+        "Extraia apenas fatos presentes no texto.",
+        textoDoDocumento,
+        jsonSchema));
+response.structuredOutput(); // JSON já validado contra o schema
+response.model();            // modelo que respondeu, para gravar como model_version
+```
+
+**O que ele faz em cada chamada.**
+
+- **Modelo.** O padrão é `claude-opus-5`, e o pedido pode informar outro. O modelo que efetivamente respondeu vem em `LlmResponse.model()` e é o que deve ser gravado como `model_version` (seção 10).
+- **Resposta estruturada.** Quando o pedido traz um JSON Schema, ele vai em `output_config.format` (`json_schema`), e a resposta é validada de novo no cliente, com o `json-schema-validator`. O cliente recusa com `LlmResponseValidationException` uma resposta que não é JSON, que viola o schema ou que foi cortada pelo limite de tokens (`stop_reason: max_tokens`). Nada inválido segue adiante.
+- **Recusa do modelo.** `stop_reason: refusal` vira `LlmRefusalException`, com a categoria informada. Por padrão, o cliente envia `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`): quando um modelo recusa um pedido por política, o próprio provedor tenta outro na mesma chamada, e `servedByFallbackModel()` indica quando isso aconteceu. `LEXFLOW_LLM_REFUSAL_FALLBACK` vazio desliga o recurso.
+- **Esforço de raciocínio.** `LlmRequest.effort` é o ajuste de qualidade nos modelos atuais. A `temperature` existe no contrato, mas o Claude Opus 5 recusa o parâmetro; por isso ela só é enviada quando informada.
+
+**Proteções (Resilience4j, instância `llm`, configuradas no `application.yml`), de dentro para fora:**
+
+| Proteção | Padrão | Papel |
+|---|---|---|
+| Bulkhead | 16 chamadas simultâneas por réplica, espera de até 10 s | Um provedor lento não prende todas as threads do worker |
+| Time limiter | 180 s por tentativa (o HTTP corta em 190 s) | Nenhuma chamada fica pendurada |
+| Circuit breaker | Janela de 20 chamadas, abre com 50% de falhas ou 80% de chamadas lentas (mais de 120 s), fica 30 s aberto | Com o provedor fora, falha na hora em vez de acumular esperas |
+| Retry | 3 tentativas, backoff exponencial de 2 s a 20 s | Repete 429, 5xx, 529 (sobrecarga), timeout e falha de conexão |
+
+**Como cada falha é tratada:**
+
+| Exceção | Quando | Repete? | Conta para o circuito? |
+|---|---|---|---|
+| `LlmUnavailableException` | 408, 409, 429, 5xx, 529, timeout, conexão, circuito aberto, bulkhead cheio | Sim (menos com circuito aberto) | Sim (menos com bulkhead cheio) |
+| `LlmRequestRejectedException` | Demais 4xx, ou chave de API ausente | Não | Não |
+| `LlmResponseValidationException` | Resposta não é JSON, viola o schema ou veio truncada | Não | Não |
+| `LlmRefusalException` | O modelo recusou | Não | Não |
+
+Quem consome uma fila deixa a `LlmUnavailableException` subir, para a mensagem voltar mais tarde. As outras exceções pedem uma decisão do caso de uso (Prompt 11 em diante).
+
+**Nada de conteúdo no log.** Em `INFO` saem modelo pedido e servido, `stop_reason`, tokens, latência e `request-id`. Nem em `DEBUG` o prompt é registrado: só o tamanho e um hash. O `toString` de `LlmRequest` e `LlmResponse` também omite o texto.
+
+**Chave de API.** Vem de `ANTHROPIC_API_KEY`. Sem ela, a aplicação sobe normalmente e só as chamadas ao LLM falham, com `LlmRequestRejectedException`.
+
 ## Como executar
 
 Pré-requisitos:
@@ -330,6 +377,18 @@ O checklist é coberto em três níveis:
 - **integração**: `ChecklistPersistenceIT` testa o seed e as restrições no banco, `ChecklistRuleAdminIT` testa o CRUD com autenticação real e `LegalCaseChecklistIT` testa o fluxo de ponta a ponta, com documentação completa e incompleta.
 
 Os testes administrativos usam códigos próprios (`IT_...`) e removem as regras que criam, porque o banco é compartilhado com os demais testes da API.
+
+O cliente LLM é testado em `AnthropicMessagesClientIT`, contra um provedor simulado com **WireMock**. O teste não precisa de Docker nem de chave de API. Ele sobe só o cliente e a autoconfiguração real do Resilience4j, com tempos curtos, e cobre:
+
+- resposta válida, incluindo cabeçalhos e corpo enviados;
+- JSON malformado, schema violado e resposta truncada;
+- recusa do modelo;
+- 5xx seguido de sucesso, 529 e 429 persistentes, e 400 sem nova tentativa;
+- timeout e queda de conexão;
+- o circuito abrindo, falhando sem chamar o provedor e fechando quando ele volta;
+- o bulkhead isolando uma chamada lenta das demais.
+
+O `LexFlowApplicationTest` confere que a configuração do `application.yml` foi carregada.
 
 Os testes de extração (`TikaDocumentTextExtractorTest`, `LegalCaseClassificationExtractionIT` e `LegalCaseChecklistIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
 
@@ -385,6 +444,15 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_RABBITMQ_MAX_ATTEMPTS` | Tentativas antes da dead-letter (padrão `4`) |
 | `LEXFLOW_ADMIN_USERNAME` | Usuário da API administrativa (padrão `admin` no perfil `dev`; obrigatório em `prod`) |
 | `LEXFLOW_ADMIN_PASSWORD` | Senha da API administrativa, em texto ou `{bcrypt}...` (padrão `lexflow-admin` no perfil `dev`; obrigatória em `prod`) |
+| `ANTHROPIC_API_KEY` | Chave da API da Anthropic; sem ela, as chamadas ao LLM falham, mas a aplicação sobe |
+| `LEXFLOW_LLM_MODEL` | Modelo padrão (padrão `claude-opus-5`) |
+| `LEXFLOW_LLM_MAX_TOKENS` | Limite de tokens padrão por resposta (padrão `16000`) |
+| `LEXFLOW_LLM_BASE_URL` | Endereço da API (padrão `https://api.anthropic.com`) |
+| `LEXFLOW_LLM_TIMEOUT` / `LEXFLOW_LLM_RESPONSE_TIMEOUT` | Tempo máximo por tentativa no time limiter e na camada HTTP (padrão `180s` / `190s`) |
+| `LEXFLOW_LLM_MAX_ATTEMPTS` | Tentativas por chamada (padrão `3`) |
+| `LEXFLOW_LLM_CIRCUIT_OPEN_WAIT` | Tempo com o circuito aberto (padrão `30s`) |
+| `LEXFLOW_LLM_MAX_CONCURRENT_CALLS` | Chamadas simultâneas ao LLM por réplica (padrão `16`) |
+| `LEXFLOW_LLM_REFUSAL_FALLBACK` | `default` para o provedor tentar outro modelo quando o pedido é recusado; vazio desliga |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
 | `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
 | `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |

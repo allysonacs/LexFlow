@@ -20,6 +20,12 @@ dependencies {
     implementation(libs.tika.parser.pdf)
     implementation(libs.tika.parser.microsoft)
     implementation(libs.tika.parser.ocr)
+    // Cliente LLM (Prompt 10): WebClient reativo, Resilience4j e validação de JSON Schema.
+    implementation(libs.spring.boot.starter.webflux)
+    implementation(libs.spring.boot.starter.aop)
+    implementation(libs.resilience4j.spring.boot3)
+    implementation(libs.resilience4j.reactor)
+    implementation(libs.json.schema.validator)
     implementation(libs.jackson.databind)
     implementation(libs.jackson.datatype.jsr310)
     implementation(libs.flyway.core)
@@ -37,4 +43,6 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(platform(libs.awssdk.bom))
     testImplementation(libs.awssdk.s3)
+    testImplementation(libs.wiremock.standalone)
+    testImplementation(libs.awaitility)
 }

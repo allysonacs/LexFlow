@@ -22,4 +22,6 @@ dependencies {
     // Os testes de fila esperam um efeito assíncrono; sem isso restaria dormir por um tempo fixo.
     testImplementation(libs.awaitility)
     testImplementation(libs.spring.boot.starter.amqp)
+    // O teste de contexto confere a configuração do Resilience4j lida do application.yml.
+    testImplementation(libs.resilience4j.spring.boot3)
 }
