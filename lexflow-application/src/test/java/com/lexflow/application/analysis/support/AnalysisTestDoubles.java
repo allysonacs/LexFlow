@@ -64,7 +64,12 @@ Responda somente com um objeto JSON no formato definido, com "question_key" igua
         // classe utilitária
     }
 
-    /** Respostas em memória, com a mesma unicidade do banco: uma por pergunta em cada demanda. */
+    /**
+     * Respostas em memória, com a mesma unicidade do banco: uma por pergunta em cada demanda.
+     *
+     * <p>Gravar de novo a mesma resposta — o que a segunda checagem faz ao registrar o selo —
+     * atualiza a linha; gravar outra resposta para a mesma pergunta viola a unicidade, como no banco.
+     */
     public static final class InMemoryAiAnalysisResponseRepository implements AiAnalysisResponseRepository {
 
         private final Map<String, AiAnalysisResponse> responses = new LinkedHashMap<>();
@@ -72,7 +77,8 @@ Responda somente com um objeto JSON no formato definido, com "question_key" igua
         @Override
         public AiAnalysisResponse save(AiAnalysisResponse response) {
             String key = response.legalCaseId() + "|" + response.questionKey();
-            if (responses.containsKey(key)) {
+            AiAnalysisResponse existing = responses.get(key);
+            if (existing != null && !existing.id().equals(response.id())) {
                 throw new IllegalStateException("pergunta já respondida: " + key);
             }
             responses.put(key, response);
@@ -144,6 +150,32 @@ Responda somente com um objeto JSON no formato definido, com "question_key" igua
         private static String unescape(String value) {
             return value.replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\");
         }
+    }
+
+    /** Leitor do veredito da segunda checagem (Prompt 14), no mesmo espírito do leitor de respostas. */
+    public static final class SimpleAnswerVerificationReader
+            implements com.lexflow.application.verification.AnswerVerificationReader {
+
+        private static final Pattern SUPPORTED = Pattern.compile("\"supported\"\\s*:\\s*(true|false)");
+        private static final Pattern JUSTIFICATION =
+                Pattern.compile("\"justification\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+
+        @Override
+        public com.lexflow.application.verification.AnswerVerification read(String json) {
+            if (json == null || !json.trim().startsWith("{")) {
+                throw new IllegalArgumentException("veredito da verificação não é um objeto JSON");
+            }
+            Matcher supported = SUPPORTED.matcher(json);
+            Matcher justification = JUSTIFICATION.matcher(json);
+            return new com.lexflow.application.verification.AnswerVerification(
+                    supported.find() && Boolean.parseBoolean(supported.group(1)),
+                    justification.find() ? justification.group(1) : "");
+        }
+    }
+
+    /** Monta o JSON do veredito da segunda checagem. */
+    public static String verificationJson(boolean supported, String justification) {
+        return "{\"supported\": %s, \"justification\": \"%s\"}".formatted(supported, escape(justification));
     }
 
     /** Monta o JSON de uma resposta jurídica, no formato do schema. */

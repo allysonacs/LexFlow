@@ -3,6 +3,7 @@ package com.lexflow.application.legalcase;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.lexflow.application.analysis.AiAnalysisVerifier;
 import com.lexflow.application.analysis.AnalyzeLegalCaseUseCase;
 import com.lexflow.application.analysis.support.AnalysisTestDoubles;
 import com.lexflow.application.analysis.support.AnalysisTestDoubles.InMemoryAiAnalysisResponseRepository;
@@ -143,6 +144,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
                 llm,
                 new FakeStructuredOutputValidator(),
                 new SimpleLegalAnalysisAnswerReader(),
+                AiAnalysisVerifier.disabled(),
                 transitions,
                 statusHistoryRepository,
                 transactionRunner,

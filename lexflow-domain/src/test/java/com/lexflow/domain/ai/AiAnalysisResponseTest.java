@@ -78,15 +78,19 @@ class AiAnalysisResponseTest {
     void shouldFlagVerificationResultWithoutChangingTheAnswer() {
         AiAnalysisResponse original = response("O contrato pode ser assinado.", List.of(CHUNK));
 
-        AiAnalysisResponse verified = original.markVerified();
-        AiAnalysisResponse failed = original.markVerificationFailed();
+        AiAnalysisResponse verified = original.markVerified("O trecho citado prevê exatamente essa alçada.");
+        AiAnalysisResponse failed = original.markVerificationFailed("O trecho citado trata de outro assunto.");
 
         assertThat(verified.verificationStatus()).isEqualTo(VerificationStatus.VERIFIED);
         assertThat(verified.confidenceScore()).isEqualTo(original.confidenceScore());
         assertThat(failed.verificationStatus()).isEqualTo(VerificationStatus.FAILED);
         assertThat(failed.confidenceScore().value()).isZero();
         assertThat(failed.answerText()).isEqualTo(original.answerText());
+        assertThat(failed.verificationNotes()).isEqualTo("O trecho citado trata de outro assunto.");
+        assertThat(verified.verificationNotes()).contains("alçada");
         assertThat(original.verificationStatus()).isEqualTo(VerificationStatus.NOT_VERIFIED);
+        assertThat(original.awaitsVerification()).isTrue();
+        assertThat(verified.awaitsVerification()).isFalse();
     }
 
     @Test
@@ -118,6 +122,7 @@ class AiAnalysisResponseTest {
                         "claude-opus-5",
                         null,
                         VerificationStatus.NOT_VERIFIED,
+                        null,
                         CREATED_AT))
                 .withMessageContaining("determinística");
     }
@@ -136,6 +141,7 @@ class AiAnalysisResponseTest {
                         " ",
                         UUID.randomUUID(),
                         VerificationStatus.NOT_VERIFIED,
+                        null,
                         CREATED_AT))
                 .withMessageContaining("modelVersion");
 

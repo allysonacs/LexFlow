@@ -40,8 +40,9 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 11 | Extração estruturada de fatos via LLM, com prompt versionado e alertas | concluído |
 | 12 | Base normativa e RAG (pgvector) | concluído |
 | 13 | Orquestração do prompt chain (respostas às perguntas jurídicas) | concluído |
-| 14 | Segunda checagem (self-verification) | próximo |
-| 15–19 | Revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 14 | Segunda checagem (self-verification) | concluído |
+| 15 | API de revisão humana e decisão | próximo |
+| 16–19 | Auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
 Hoje o pipeline vai da ingestão até as respostas da IA, prontas para o revisor humano:
 
@@ -414,6 +415,21 @@ Falhando, há **uma** nova tentativa com o prompt reforçado, listando as viola�
 - **Etapa retomável.** Uma pergunta já respondida não volta ao modelo (índice único por demanda e pergunta). Com um alerta desta etapa em aberto, nenhuma chamada nova é feita: a demanda espera tratamento humano, e repetir custaria dinheiro sem mudar o desfecho.
 - **Desligar a etapa.** `LEXFLOW_LEGAL_ANALYSIS_ENABLED=false` faz a demanda parar em `AI_ANALYSIS_IN_PROGRESS`, sem consultar a base normativa nem o LLM.
 
+### Segunda checagem (`lexflow-application`)
+
+Uma camada extra contra a alucinação residual. Para as perguntas mais críticas — `CAN_SIGN_CONTRACT`, `CAN_PAY_SETTLEMENT` e `CAN_CLOSE_LAWSUIT` —, uma segunda chamada ao modelo confere se a resposta é mesmo sustentada pelos trechos que ela citou. Ela roda **antes** de a demanda chegar ao revisor: uma resposta reprovada precisa chegar já sinalizada.
+
+| Veredito | O que acontece |
+|---|---|
+| Sustentada | `verification_status = VERIFIED`, confiança mantida, justificativa gravada |
+| Não sustentada | `verification_status = FAILED`, **confiança zerada**, justificativa gravada |
+| Checagem não concluída (formato inválido ou recusa) | Segue `NOT_VERIFIED`: a etapa é extra e não pode impedir a entrega ao revisor |
+| Trecho citado não está mais na base (reindexação) | `FAILED`, sem chamar o modelo: a fundamentação não pôde ser conferida |
+
+- **Ela confere, não reescreve.** O texto da resposta original nunca é alterado — a segunda checagem sinaliza e explica, e a decisão continua sendo de uma pessoa.
+- **Só o que faz sentido verificar.** Respostas determinísticas (cujo fundamento é uma regra de código), respostas que declaram "informação não encontrada na base normativa" e perguntas não críticas não gastam uma chamada a mais.
+- **Configurável.** `LEXFLOW_SELF_VERIFICATION_ENABLED=false` desliga a etapa, e `LEXFLOW_SELF_VERIFICATION_QUESTIONS` amplia a lista de perguntas verificadas. Desligada, as respostas chegam como `NOT_VERIFIED` — o revisor vê que a checagem não aconteceu, em vez de supor que ela passou.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -526,6 +542,8 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
 
+A segunda checagem é coberta em `VerifyAiAnalysisResponseUseCaseTest` (os dois vereditos, a checagem inconclusiva, o trecho que sumiu da base e as respostas que não devem ser verificadas) e, de ponta a ponta, em `LegalCaseAnalysisIT`, onde o critério de aceite do Prompt 14 é uma resposta deliberadamente não sustentada virando `FAILED` com confiança zerada.
+
 A cadeia de prompts é coberta em dois níveis:
 
 - **aplicação** (`AnalyzeLegalCaseUseCaseTest`): com LLM roteirizado e base normativa em memória, cobre a resposta de todas as perguntas, as duas respostas determinísticas, a recusa de citação inventada, a nova tentativa reforçada, os alertas e a retomada — tudo sem Docker;
@@ -617,6 +635,8 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_FACT_EXTRACTION_ENABLED` | Liga a extração de fatos via LLM (padrão `true`); desligada, a demanda para em `EXTRACTING` |
 | `LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS` | Tamanho máximo do texto enviado por documento (padrão `400000`); acima disso, alerta |
 | `LEXFLOW_LEGAL_ANALYSIS_ENABLED` | Liga a cadeia de prompts (padrão `true`); desligada, a demanda para em `AI_ANALYSIS_IN_PROGRESS` |
+| `LEXFLOW_SELF_VERIFICATION_ENABLED` | Liga a segunda checagem das respostas críticas (padrão `true`) |
+| `LEXFLOW_SELF_VERIFICATION_QUESTIONS` | Perguntas verificadas, separadas por vírgula; em branco usa as três críticas da seção 10 |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
 | `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
 | `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |

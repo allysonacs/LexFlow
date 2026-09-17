@@ -90,6 +90,7 @@ class AnalyzeLegalCaseUseCaseTest {
     private ScriptedLlmClient llm;
     private FakeStructuredOutputValidator validator;
     private DocumentChecklistService checklistService;
+    private RecordingVerifier verifier;
     private AnalyzeLegalCaseUseCase useCase;
 
     @BeforeEach
@@ -112,6 +113,7 @@ class AnalyzeLegalCaseUseCaseTest {
         validator = new FakeStructuredOutputValidator();
         checklistService = new DocumentChecklistService(
                 legalCaseRepository, documentRepository, ruleRepository, checklistItemRepository, clock, ids);
+        verifier = new RecordingVerifier();
         useCase = new AnalyzeLegalCaseUseCase(
                 legalCaseRepository,
                 documentRepository,
@@ -124,6 +126,7 @@ class AnalyzeLegalCaseUseCaseTest {
                 llm,
                 validator,
                 new SimpleLegalAnalysisAnswerReader(),
+                verifier,
                 new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids),
                 historyRepository,
                 new DirectTransactionRunner(),
@@ -150,6 +153,9 @@ class AnalyzeLegalCaseUseCaseTest {
                 .isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW);
         assertThat(historyRepository.findByLegalCaseId(legalCase.id()))
                 .anySatisfy(entry -> assertThat(entry.reason()).contains("Análise da IA concluída"));
+        // A segunda checagem roda antes da transição: a resposta chega ao revisor já com o selo.
+        assertThat(verifier.calls()).containsExactly(legalCase.id());
+        assertThat(result.verification().verified()).isEqualTo(1);
     }
 
     @Test
@@ -254,6 +260,8 @@ class AnalyzeLegalCaseUseCaseTest {
 
         assertThat(result.advanced()).isFalse();
         assertThat(result.llmCalls()).isEqualTo(2);
+        // Sem avançar, não há o que verificar: a segunda checagem nem é chamada.
+        assertThat(verifier.calls()).isEmpty();
         assertThat(responseRepository.findByLegalCaseId(legalCase.id())).isEmpty();
         assertThat(alertRepository.all()).singleElement().satisfies(alert -> {
             assertThat(alert.type()).isEqualTo(LegalCaseAlertType.AI_ANALYSIS_INVALID_OUTPUT);
@@ -370,6 +378,7 @@ class AnalyzeLegalCaseUseCaseTest {
                 llm,
                 validator,
                 new SimpleLegalAnalysisAnswerReader(),
+                verifier,
                 new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids),
                 historyRepository,
                 new DirectTransactionRunner(),
@@ -447,6 +456,22 @@ class AnalyzeLegalCaseUseCaseTest {
                 .map(KnowledgeBaseChunk::id)
                 .findFirst()
                 .orElseThrow());
+    }
+
+    /** Verificador que apenas registra as demandas em que foi chamado (a checagem tem teste próprio). */
+    private static final class RecordingVerifier implements com.lexflow.application.analysis.AiAnalysisVerifier {
+
+        private final List<UUID> calls = new java.util.ArrayList<>();
+
+        @Override
+        public com.lexflow.application.analysis.VerificationSummary verify(UUID legalCaseId) {
+            calls.add(legalCaseId);
+            return new com.lexflow.application.analysis.VerificationSummary(1, 0, 0, 1);
+        }
+
+        List<UUID> calls() {
+            return List.copyOf(calls);
+        }
     }
 
     /** Descobre qual pergunta o prompt está fazendo, para o dublê responder a ela. */

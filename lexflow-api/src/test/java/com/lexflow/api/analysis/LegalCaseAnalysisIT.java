@@ -7,6 +7,7 @@ import com.lexflow.api.AbstractApiIT;
 import com.lexflow.api.support.StubLlmClient;
 import com.lexflow.application.analysis.LegalAnalysisSchema;
 import com.lexflow.domain.ai.AnswerSource;
+import com.lexflow.domain.ai.VerificationStatus;
 import com.lexflow.domain.ai.QuestionKey;
 import com.lexflow.domain.legalcase.LegalCaseStatus;
 import com.lexflow.domain.legalcase.LegalCaseType;
@@ -212,6 +213,49 @@ class LegalCaseAnalysisIT extends AbstractApiIT {
         assertThat(llm.requests())
                 .filteredOn(request -> request.outputSchema().contains("cited_chunks"))
                 .hasSize(2);
+    }
+
+    @Test
+    @DisplayName("a resposta de uma pergunta crítica passa pela segunda checagem antes de chegar ao revisor")
+    void shouldVerifyCriticalAnswersBeforeHumanReview() {
+        indexPolicy();
+        UUID legalCaseId = ingestContract("CONTRACT_DRAFT", "FINANCIAL_OPINION");
+
+        await().atMost(TIMEOUT)
+                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW));
+
+        AiAnalysisResponseEntity critica = responseRepository
+                .findByLegalCaseIdAndQuestionKey(legalCaseId, QuestionKey.CAN_SIGN_CONTRACT)
+                .orElseThrow();
+        assertThat(critica.getVerificationStatus()).isEqualTo(VerificationStatus.VERIFIED);
+        assertThat(critica.getVerificationNotes()).contains("sustenta a resposta");
+        // As perguntas não críticas não gastam uma chamada a mais.
+        assertThat(responseRepository
+                        .findByLegalCaseIdAndQuestionKey(legalCaseId, QuestionKey.COMPLIES_WITH_LAW_AND_POLICY)
+                        .orElseThrow()
+                        .getVerificationStatus())
+                .isEqualTo(VerificationStatus.NOT_VERIFIED);
+    }
+
+    @Test
+    @DisplayName("critério de aceite: resposta não sustentada pelos trechos citados vira FAILED, com confiança zerada")
+    void shouldFlagAnswerNotSupportedByTheCitedChunks() {
+        indexPolicy();
+        llm.verificationSupported(false);
+        UUID legalCaseId = ingestContract("CONTRACT_DRAFT", "FINANCIAL_OPINION");
+
+        await().atMost(TIMEOUT)
+                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.PENDING_HUMAN_REVIEW));
+
+        AiAnalysisResponseEntity critica = responseRepository
+                .findByLegalCaseIdAndQuestionKey(legalCaseId, QuestionKey.CAN_SIGN_CONTRACT)
+                .orElseThrow();
+        assertThat(critica.getVerificationStatus()).isEqualTo(VerificationStatus.FAILED);
+        assertThat(critica.getConfidenceScore()).isZero();
+        assertThat(critica.getVerificationNotes()).contains("outro assunto");
+        // A checagem sinaliza; ela não reescreve: o texto original continua lá, e a demanda chega ao
+        // revisor humano como qualquer outra.
+        assertThat(critica.getAnswerText()).isNotBlank().doesNotContain("outro assunto");
     }
 
     @Test

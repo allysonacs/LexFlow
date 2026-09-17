@@ -66,11 +66,11 @@ public enum QuestionKey {
     /**
      * Perguntas críticas, que passam pela segunda checagem descrita na seção 10, item 4.
      *
-     * <p>No Prompt 14 esta lista passa a ser configurável; aqui ela registra o conjunto mínimo
-     * definido pela base de conhecimento.
+     * <p>A configuração pode ampliar esta lista (Prompt 14); aqui fica o conjunto mínimo definido
+     * pela base de conhecimento.
      */
-    private static final Set<QuestionKey> CRITICAL_QUESTIONS =
-            Set.of(CAN_SIGN_CONTRACT, CAN_PAY_SETTLEMENT, CAN_CLOSE_LAWSUIT);
+    private static final Set<QuestionKey> CRITICAL_QUESTIONS = Collections.unmodifiableSet(
+            new LinkedHashSet<>(List.of(CAN_SIGN_CONTRACT, CAN_PAY_SETTLEMENT, CAN_CLOSE_LAWSUIT)));
 
     /**
      * Perguntas aplicáveis a um tipo de demanda: a pergunta específica do tipo mais as comuns a
@@ -86,6 +86,16 @@ public enum QuestionKey {
     /** Indica se esta pergunta exige a segunda checagem (self-verification). */
     public boolean isCritical() {
         return CRITICAL_QUESTIONS.contains(this);
+    }
+
+    /**
+     * Conjunto mínimo de perguntas críticas definido pela base de conhecimento.
+     *
+     * <p>A configuração pode ampliá-lo (Prompt 14), nunca reduzi-lo abaixo do que a seção 10, item 4,
+     * exige: as três perguntas cuja resposta errada tem a consequência mais cara.
+     */
+    public static Set<QuestionKey> criticalQuestions() {
+        return CRITICAL_QUESTIONS;
     }
 
     /** Indica se esta pergunta é resolvida por regra determinística, sem chamar o LLM. */

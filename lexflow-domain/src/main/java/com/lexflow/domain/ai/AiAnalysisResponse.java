@@ -21,6 +21,12 @@ import java.util.UUID;
  * fundamento é a própria regra, que o revisor confere sozinho. O construtor exige, aí, justamente o
  * contrário — que modelo e versão de prompt estejam ausentes —, para que a origem gravada nunca
  * contradiga o que está registrado.
+ *
+ * <p><strong>Segunda checagem.</strong> {@link #markVerified} e {@link #markVerificationFailed}
+ * registram o resultado da verificação sem tocar no texto da resposta (Prompt 14). A segunda checagem
+ * confere; ela não reescreve.
+ *
+ * @param verificationNotes justificativa da segunda checagem; nula enquanto ela não aconteceu
  */
 public record AiAnalysisResponse(
         UUID id,
@@ -33,6 +39,7 @@ public record AiAnalysisResponse(
         String modelVersion,
         UUID promptVersionId,
         VerificationStatus verificationStatus,
+        String verificationNotes,
         Instant createdAt) {
 
     /** Texto que autoriza uma resposta do modelo sem trechos citados. */
@@ -46,6 +53,7 @@ public record AiAnalysisResponse(
         Objects.requireNonNull(answerSource, "answerSource não pode ser nulo");
         Objects.requireNonNull(verificationStatus, "verificationStatus não pode ser nulo");
         Objects.requireNonNull(createdAt, "createdAt não pode ser nulo");
+        verificationNotes = verificationNotes == null || verificationNotes.isBlank() ? null : verificationNotes.strip();
         if (answerText == null || answerText.isBlank()) {
             throw new IllegalArgumentException("answerText é obrigatório");
         }
@@ -92,6 +100,7 @@ public record AiAnalysisResponse(
                 modelVersion,
                 promptVersionId,
                 VerificationStatus.NOT_VERIFIED,
+                null,
                 createdAt);
     }
 
@@ -114,20 +123,31 @@ public record AiAnalysisResponse(
                 null,
                 null,
                 VerificationStatus.NOT_VERIFIED,
+                null,
                 createdAt);
     }
 
-    /** Marca a resposta como confirmada pela segunda checagem, sem alterar o texto original. */
-    public AiAnalysisResponse markVerified() {
-        return withVerification(VerificationStatus.VERIFIED, confidenceScore);
+    /**
+     * Marca a resposta como confirmada pela segunda checagem, sem alterar o texto original.
+     *
+     * @param notes justificativa dada pela verificação, que acompanha a resposta até o revisor
+     */
+    public AiAnalysisResponse markVerified(String notes) {
+        return withVerification(VerificationStatus.VERIFIED, confidenceScore, notes);
     }
 
     /**
      * Marca a resposta como reprovada pela segunda checagem e zera a confiança, para que o revisor
-     * humano veja o alerta (Prompt 14). O texto da resposta permanece intacto.
+     * humano veja o alerta (Prompt 14). O texto da resposta permanece intacto: a segunda checagem
+     * sinaliza, não reescreve.
      */
-    public AiAnalysisResponse markVerificationFailed() {
-        return withVerification(VerificationStatus.FAILED, ConfidenceScore.zero());
+    public AiAnalysisResponse markVerificationFailed(String notes) {
+        return withVerification(VerificationStatus.FAILED, ConfidenceScore.zero(), notes);
+    }
+
+    /** Indica se esta resposta ainda pode ser submetida à segunda checagem. */
+    public boolean awaitsVerification() {
+        return verificationStatus == VerificationStatus.NOT_VERIFIED;
     }
 
     /** Indica se a resposta declara que nada foi encontrado na base normativa. */
@@ -140,7 +160,7 @@ public record AiAnalysisResponse(
         return answerSource.isFromLlm();
     }
 
-    private AiAnalysisResponse withVerification(VerificationStatus status, ConfidenceScore score) {
+    private AiAnalysisResponse withVerification(VerificationStatus status, ConfidenceScore score, String notes) {
         return new AiAnalysisResponse(
                 id,
                 legalCaseId,
@@ -152,6 +172,7 @@ public record AiAnalysisResponse(
                 modelVersion,
                 promptVersionId,
                 status,
+                notes,
                 createdAt);
     }
 

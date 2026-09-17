@@ -48,6 +48,7 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Trecho recuperado | `RetrievedChunk` | Trecho devolvido pela busca por similaridade, com a fonte e o grau de proximidade |
 | Resposta da IA | `AiAnalysisResponse` | Resposta estruturada a uma pergunta jurídica específica, com fonte citada e confiança |
 | Origem da resposta | `AnswerSource` | Se a resposta veio do modelo (`LLM`) ou de uma regra de código (`DETERMINISTIC`) |
+| Resultado da segunda checagem | `VerificationStatus` | `NOT_VERIFIED`, `VERIFIED` ou `FAILED` para uma resposta crítica |
 | Versão de prompt | `PromptVersion` | Registro versionado do template de prompt usado, para rastreabilidade |
 | Decisão humana | `Decision` | Decisão final do responsável: aprovar, reprovar ou devolver |
 | Texto extraído | `DocumentTextContent` | Texto de um documento, obtido da camada de texto ou por OCR, sem nenhum uso de LLM (Prompt 08) |
@@ -188,9 +189,12 @@ knowledge_base_chunks (
 
 ai_analysis_responses (
   id, legal_case_id, question_key, answer_text, confidence_score,
-  cited_chunks, answer_source, model_version, prompt_version_id, created_at
+  cited_chunks, answer_source, model_version, prompt_version_id,
+  verification_status, verification_notes, created_at
 )
 -- answer_source: LLM | DETERMINISTIC
+-- verification_status: NOT_VERIFIED | VERIFIED | FAILED (Prompt 14)
+-- verification_notes: justificativa da segunda checagem; nula enquanto ela não aconteceu
 -- único por (legal_case_id, question_key): uma resposta por pergunta em cada demanda
 -- LLM exige model_version e prompt_version_id; DETERMINISTIC exige os dois nulos (restrição de banco)
 
@@ -234,6 +238,7 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V5__seed_checklist_rules.sql` | regras iniciais do checklist, com identificadores fixos (Prompt 09) |
 | `V6__fact_extraction.sql` | `ai_extracted_facts.prompt_version_id`, índices únicos, `legal_case_alerts` e o prompt `FACT_EXTRACTION` v1 (Prompt 11) |
 | `V7__legal_analysis.sql` | `ai_analysis_responses.answer_source`, restrição de rastreabilidade, índice único por pergunta e o prompt `LEGAL_ANALYSIS` v1 (Prompt 13) |
+| `V8__answer_verification.sql` | `ai_analysis_responses.verification_status` e `verification_notes`, e o prompt `ANSWER_VERIFICATION` v1 (Prompt 14) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -324,7 +329,7 @@ Fluxo em cadeia (prompt chaining), nunca uma única chamada monolítica:
    }
    ```
    Validado contra um JSON Schema fixo antes de ser persistido.
-4. **Segunda checagem (self-verification)** — para perguntas críticas (`CAN_SIGN_CONTRACT`, `CAN_PAY_SETTLEMENT`, `CAN_CLOSE_LAWSUIT`), uma chamada adicional confere se a resposta é de fato suportada pelos `cited_chunks`.
+4. **Segunda checagem (self-verification)** — para perguntas críticas (`CAN_SIGN_CONTRACT`, `CAN_PAY_SETTLEMENT`, `CAN_CLOSE_LAWSUIT`, ampliáveis por configuração), uma chamada adicional confere se a resposta é de fato suportada pelos `cited_chunks`. Ela roda antes de a demanda chegar ao revisor e nunca reescreve a resposta. Detalhes na seção 14 (Prompt 14).
 5. Toda chamada ao LLM grava qual `PromptVersion` foi usada.
 6. Nenhuma resposta do modelo é aceita sem `cited_chunks` preenchido, exceto quando o `answer` for explicitamente "informação não encontrada na base normativa".
 7. Nenhuma resposta é aceita citando um trecho que não foi fornecido naquela chamada: um `chunk_id` inventado é alucinação com aparência de fundamento.
@@ -544,3 +549,11 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Retomada.** Perguntas já respondidas não voltam ao modelo (índice único por `(legal_case_id, question_key)`). Com um alerta desta etapa em aberto, nenhuma chamada nova é feita: a demanda espera tratamento humano, e repetir custaria dinheiro sem mudar o desfecho.
 - **Leitura do JSON.** A camada de aplicação não conhece biblioteca de serialização (seção 7): a porta `LegalAnalysisAnswerReader` é implementada com Jackson na infraestrutura.
 - **Testes.** Nenhum teste chama o LLM real. O critério de aceite roda em `LegalCaseAnalysisIT`, de ponta a ponta, com uma norma indexada pela API e o LLM simulado.
+
+**Segunda checagem (Prompt 14)**
+- `VerifyAiAnalysisResponseUseCase` implementa a porta `AiAnalysisVerifier`, que a cadeia de prompts chama **antes** da transição para `PENDING_HUMAN_REVIEW`: uma resposta reprovada precisa chegar ao revisor já sinalizada, e não sinalizada depois.
+- **Ela confere, não reescreve.** O texto da resposta nunca muda. Muda o selo: `VERIFIED`, ou `FAILED` com a confiança zerada, mais a justificativa em `verification_notes`.
+- **O que é verificado.** Só respostas de perguntas críticas que vieram do modelo e citaram algum trecho. Ficam de fora as determinísticas, as que declaram que a informação não está na base e as perguntas não críticas — cada verificação é uma chamada a mais.
+- **Se a própria checagem falhar.** Saída fora do formato ou recusa deixam a resposta em `NOT_VERIFIED`: a checagem é uma camada extra e não pode impedir a demanda de chegar ao revisor, e "não verificada" é uma informação honesta. Provedor indisponível sobe como exceção, e a mensagem volta para a fila.
+- **Trecho citado que sumiu.** Se a fonte foi reindexada e o trecho citado não existe mais, a resposta vai para `FAILED`: a fundamentação não pôde ser conferida.
+- **Configuração.** `lexflow.pipeline.self-verification.enabled` liga a etapa e `question-keys` amplia a lista de perguntas críticas; em branco vale o conjunto mínimo da seção 10, item 4. Desligada, as respostas chegam ao revisor como `NOT_VERIFIED` — o que é diferente de esconder a etapa.

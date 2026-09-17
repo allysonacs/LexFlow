@@ -8,8 +8,8 @@ import com.lexflow.infrastructure.persistence.entity.AiAnalysisResponseEntity;
 /**
  * Converte entre {@link AiAnalysisResponse} e {@link AiAnalysisResponseEntity}.
  *
- * <p>Enquanto a coluna {@code verification_status} não existe (ela chega na migration do Prompt 14),
- * toda resposta lida do banco volta como {@link VerificationStatus#NOT_VERIFIED}.
+ * <p>O resultado da segunda checagem ({@link VerificationStatus}) e a sua justificativa vão e voltam
+ * do banco desde a migration V8 (Prompt 14).
  */
 public final class AiAnalysisResponseMapper {
 
@@ -28,6 +28,8 @@ public final class AiAnalysisResponseMapper {
                 response.answerSource(),
                 response.modelVersion(),
                 response.promptVersionId(),
+                response.verificationStatus(),
+                response.verificationNotes(),
                 response.createdAt());
     }
 
@@ -42,7 +44,8 @@ public final class AiAnalysisResponseMapper {
                 entity.getAnswerSource(),
                 entity.getModelVersion(),
                 entity.getPromptVersionId(),
-                VerificationStatus.NOT_VERIFIED,
+                entity.getVerificationStatus(),
+                entity.getVerificationNotes(),
                 entity.getCreatedAt());
     }
 }

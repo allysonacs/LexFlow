@@ -116,6 +116,14 @@ lexflow:
       # Cadeia de prompts que responde às perguntas jurídicas (Prompt 13). Desligada, a demanda para
       # em AI_ANALYSIS_IN_PROGRESS sem consultar a base normativa nem o LLM.
       enabled: ${LEXFLOW_LEGAL_ANALYSIS_ENABLED:true}
+    self-verification:
+      # Segunda checagem das respostas críticas (Prompt 14): uma chamada a mais por resposta, que
+      # confere se o texto citado sustenta o que foi afirmado. Desligada, as respostas chegam ao
+      # revisor como NOT_VERIFIED.
+      enabled: ${LEXFLOW_SELF_VERIFICATION_ENABLED:true}
+      # Perguntas verificadas, separadas por vírgula. Em branco usa o conjunto mínimo da seção 10:
+      # CAN_SIGN_CONTRACT, CAN_PAY_SETTLEMENT e CAN_CLOSE_LAWSUIT.
+      question-keys: ${LEXFLOW_SELF_VERIFICATION_QUESTIONS:}
   # Extração de texto dos documentos (Prompt 08). O OCR usa o Tesseract instalado na máquina,
   # com os pacotes de idioma informados.
   extraction:

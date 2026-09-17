@@ -2,6 +2,7 @@ package com.lexflow.api.config;
 
 import com.lexflow.application.alert.LegalCaseAlertRepository;
 import com.lexflow.application.analysis.AiAnalysisResponseRepository;
+import com.lexflow.application.analysis.AiAnalysisVerifier;
 import com.lexflow.application.analysis.AnalyzeLegalCaseUseCase;
 import com.lexflow.application.analysis.LegalAnalysisAnswerReader;
 import com.lexflow.application.checklist.ChecklistRuleRepository;
@@ -29,9 +30,15 @@ import com.lexflow.application.legalcase.LegalCaseStatusTransitionService;
 import com.lexflow.application.legalcase.ProcessLegalCaseReceivedEventService;
 import com.lexflow.application.legalcase.ReceiveLegalCaseService;
 import com.lexflow.application.transaction.TransactionRunner;
+import com.lexflow.application.verification.AnswerVerificationReader;
+import com.lexflow.application.verification.VerifyAiAnalysisResponseUseCase;
+import com.lexflow.domain.ai.QuestionKey;
 import com.lexflow.domain.classification.LegalCaseKeywordClassifier;
 import com.lexflow.domain.legalcase.LegalCaseStatusTransitionRules;
 import java.time.Clock;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -175,6 +182,7 @@ public class LegalCaseUseCaseConfiguration {
             LlmClientPort llmClient,
             StructuredOutputValidator structuredOutputValidator,
             LegalAnalysisAnswerReader answerReader,
+            AiAnalysisVerifier aiAnalysisVerifier,
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             TransactionRunner transactionRunner,
@@ -191,6 +199,7 @@ public class LegalCaseUseCaseConfiguration {
                 llmClient,
                 structuredOutputValidator,
                 answerReader,
+                aiAnalysisVerifier,
                 statusTransitionService,
                 statusHistoryRepository,
                 transactionRunner,
@@ -199,7 +208,55 @@ public class LegalCaseUseCaseConfiguration {
     }
 
     /**
-     * Caso de uso disparado pelo consumo da fila (Prompts 07 a 13).
+     * Segunda checagem das respostas críticas (Prompt 14).
+     *
+     * <p>Desligada, o verificador vira um objeto que não faz nada, e as respostas chegam ao revisor
+     * como {@code NOT_VERIFIED}. Isso é diferente de esconder a etapa: o revisor vê que a checagem
+     * não aconteceu.
+     *
+     * @param enabled cada verificação é uma chamada a mais ao LLM; em ambientes de desenvolvimento
+     *     costuma ser desnecessária
+     * @param questionKeys perguntas verificadas, separadas por vírgula; em branco usa o conjunto
+     *     mínimo da base de conhecimento ({@code CAN_SIGN_CONTRACT}, {@code CAN_PAY_SETTLEMENT} e
+     *     {@code CAN_CLOSE_LAWSUIT})
+     */
+    @Bean
+    public AiAnalysisVerifier aiAnalysisVerifier(
+            AiAnalysisResponseRepository responseRepository,
+            KnowledgeBaseRetriever knowledgeBaseRetriever,
+            PromptVersionRepository promptVersionRepository,
+            LlmClientPort llmClient,
+            StructuredOutputValidator structuredOutputValidator,
+            AnswerVerificationReader answerVerificationReader,
+            @Value("${lexflow.pipeline.self-verification.enabled:true}") boolean enabled,
+            @Value("${lexflow.pipeline.self-verification.question-keys:}") String questionKeys) {
+        if (!enabled) {
+            return AiAnalysisVerifier.disabled();
+        }
+        return new VerifyAiAnalysisResponseUseCase(
+                responseRepository,
+                knowledgeBaseRetriever,
+                promptVersionRepository,
+                llmClient,
+                structuredOutputValidator,
+                answerVerificationReader,
+                criticalQuestions(questionKeys));
+    }
+
+    /** Perguntas críticas configuradas, ou o conjunto mínimo da base de conhecimento. */
+    private static Set<QuestionKey> criticalQuestions(String configured) {
+        if (configured == null || configured.isBlank()) {
+            return QuestionKey.criticalQuestions();
+        }
+        return Arrays.stream(configured.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .map(QuestionKey::valueOf)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * Caso de uso disparado pelo consumo da fila (Prompts 07 a 14).
      *
      * @param factExtractionEnabled desligar faz a demanda parar em {@code EXTRACTING}, sem chamar o
      *     LLM — útil em ambientes sem chave de API

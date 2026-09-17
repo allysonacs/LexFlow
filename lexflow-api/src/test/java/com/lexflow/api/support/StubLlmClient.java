@@ -33,7 +33,9 @@ import java.util.regex.Pattern;
  *       extração vazia no formato do schema;
  *   <li><strong>análise jurídica</strong> (Prompt 13): responde a pergunta do prompt citando o
  *       primeiro trecho normativo que lhe foi oferecido — um modelo bem-comportado nunca cita um
- *       identificador que não recebeu.
+ *       identificador que não recebeu;
+ *   <li><strong>segunda checagem</strong> (Prompt 14): confirma a resposta. O teste que precisa do
+ *       caminho contrário chama {@link #verificationSupported(boolean)}.
  * </ul>
  *
  * <p>Um teste pode enfileirar respostas próprias — que valem para as próximas chamadas, na ordem — e
@@ -52,6 +54,9 @@ public class StubLlmClient implements LlmClientPort {
     /** Marca do schema da análise jurídica (Prompt 13). */
     private static final String ANALYSIS_SCHEMA_MARKER = "cited_chunks";
 
+    /** Marca do schema da segunda checagem (Prompt 14). */
+    private static final String VERIFICATION_SCHEMA_MARKER = "\"supported\"";
+
     private static final Pattern QUESTION_KEY =
             Pattern.compile("\\(\"question_key\"\\):\\s*([A-Z_]+)");
 
@@ -61,6 +66,7 @@ public class StubLlmClient implements LlmClientPort {
     private final ObjectMapper objectMapper;
     private final Queue<Function<LlmRequest, LlmResponse>> script = new ConcurrentLinkedQueue<>();
     private final List<LlmRequest> requests = new CopyOnWriteArrayList<>();
+    private volatile boolean verificationSupported = true;
 
     public StubLlmClient(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
@@ -83,9 +89,15 @@ public class StubLlmClient implements LlmClientPort {
         return List.copyOf(requests);
     }
 
+    /** Define o veredito da segunda checagem devolvido sem roteiro. */
+    public void verificationSupported(boolean supported) {
+        this.verificationSupported = supported;
+    }
+
     public void reset() {
         script.clear();
         requests.clear();
+        verificationSupported = true;
     }
 
     /** Resposta com o JSON informado, como o cliente real devolveria. */
@@ -96,6 +108,17 @@ public class StubLlmClient implements LlmClientPort {
     }
 
     private LlmResponse wellBehaved(LlmRequest request) {
+        if (request.outputSchema().contains(VERIFICATION_SCHEMA_MARKER)) {
+            return response(
+                    """
+                    {"supported": %s, "justification": "%s"}
+                    """
+                            .formatted(
+                                    verificationSupported,
+                                    verificationSupported
+                                            ? "O trecho citado sustenta a resposta."
+                                            : "O trecho citado trata de outro assunto."));
+        }
         if (request.outputSchema().contains(ANALYSIS_SCHEMA_MARKER)) {
             return response(legalAnswer(request));
         }

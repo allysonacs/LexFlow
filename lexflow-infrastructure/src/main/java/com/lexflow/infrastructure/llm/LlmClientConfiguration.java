@@ -40,6 +40,12 @@ public class LlmClientConfiguration {
         return new JacksonLegalAnalysisAnswerReader(objectMapper);
     }
 
+    /** Leitor do JSON da segunda checagem (Prompt 14). */
+    @Bean
+    public JacksonAnswerVerificationReader answerVerificationReader(ObjectMapper objectMapper) {
+        return new JacksonAnswerVerificationReader(objectMapper);
+    }
+
     @Bean
     public AnthropicMessagesClient anthropicMessagesClient(
             LlmClientProperties properties,

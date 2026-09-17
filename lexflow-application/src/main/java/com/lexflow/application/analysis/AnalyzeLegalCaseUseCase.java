@@ -70,6 +70,10 @@ import java.util.function.Supplier;
  * inválida ganha uma única nova tentativa, com o prompt reforçado; falhando de novo, nada é gravado
  * para aquela pergunta e a demanda recebe um alerta.
  *
+ * <p><strong>Segunda checagem antes de entregar.</strong> Com todas as perguntas respondidas, as
+ * respostas críticas passam pelo {@link AiAnalysisVerifier} (Prompt 14) e só então a demanda avança:
+ * uma resposta reprovada precisa chegar ao revisor já sinalizada, e não sinalizada depois.
+ *
  * <p><strong>Retomável.</strong> Perguntas já respondidas não voltam ao modelo (índice único em
  * {@code (legal_case_id, question_key)}). Com um alerta desta etapa em aberto, nenhuma chamada nova é
  * feita: o caso espera tratamento humano, e repetir custaria dinheiro sem mudar o desfecho.
@@ -105,6 +109,7 @@ public class AnalyzeLegalCaseUseCase {
     private final LlmClientPort llmClient;
     private final StructuredOutputValidator validator;
     private final LegalAnalysisAnswerReader answerReader;
+    private final AiAnalysisVerifier verifier;
     private final LegalCaseStatusTransitionService statusTransitionService;
     private final LegalCaseStatusHistoryRepository statusHistoryRepository;
     private final TransactionRunner transactionRunner;
@@ -123,6 +128,7 @@ public class AnalyzeLegalCaseUseCase {
             LlmClientPort llmClient,
             StructuredOutputValidator validator,
             LegalAnalysisAnswerReader answerReader,
+            AiAnalysisVerifier verifier,
             LegalCaseStatusTransitionService statusTransitionService,
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             TransactionRunner transactionRunner,
@@ -140,6 +146,7 @@ public class AnalyzeLegalCaseUseCase {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient não pode ser nulo");
         this.validator = Objects.requireNonNull(validator, "validator não pode ser nulo");
         this.answerReader = Objects.requireNonNull(answerReader, "answerReader não pode ser nulo");
+        this.verifier = Objects.requireNonNull(verifier, "verifier não pode ser nulo");
         this.statusTransitionService =
                 Objects.requireNonNull(statusTransitionService, "statusTransitionService não pode ser nulo");
         this.statusHistoryRepository =
@@ -171,7 +178,11 @@ public class AnalyzeLegalCaseUseCase {
 
         if (legalCase.status() == LegalCaseStatus.PENDING_HUMAN_REVIEW) {
             return new LegalCaseAnalysisResult(
-                    responseRepository.findByLegalCaseId(legalCaseId), openAlerts(legalCaseId), 0, false);
+                    responseRepository.findByLegalCaseId(legalCaseId),
+                    openAlerts(legalCaseId),
+                    0,
+                    VerificationSummary.NONE,
+                    false);
         }
         if (legalCase.status() != LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS) {
             throw new InvalidStatusTransitionException(legalCase.status(), LegalCaseStatus.PENDING_HUMAN_REVIEW);
@@ -215,10 +226,16 @@ public class AnalyzeLegalCaseUseCase {
         boolean complete = responses.stream().map(AiAnalysisResponse::questionKey).collect(java.util.stream.Collectors.toSet())
                 .containsAll(questions);
         boolean advanced = complete && openAlerts.stream().noneMatch(LegalCaseAlert::blocksPipeline);
+
+        VerificationSummary verification = VerificationSummary.NONE;
         if (advanced) {
+            // A segunda checagem roda antes da transição: uma resposta reprovada chega ao revisor já
+            // sinalizada. Depois dela, as respostas são relidas para devolver o selo atualizado.
+            verification = verifier.verify(legalCaseId);
+            responses = responseRepository.findByLegalCaseId(legalCaseId);
             advance(legalCase, responses.size());
         }
-        return new LegalCaseAnalysisResult(responses, openAlerts, llmCalls, advanced);
+        return new LegalCaseAnalysisResult(responses, openAlerts, llmCalls, verification, advanced);
     }
 
     /**

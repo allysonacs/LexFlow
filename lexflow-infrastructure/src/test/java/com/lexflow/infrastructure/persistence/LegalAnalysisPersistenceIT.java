@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.lexflow.application.analysis.LegalAnalysisSchema;
 import com.lexflow.domain.ai.AiAnalysisResponse;
 import com.lexflow.domain.ai.QuestionKey;
+import com.lexflow.domain.ai.VerificationStatus;
 import com.lexflow.domain.legalcase.CasePriority;
 import com.lexflow.domain.legalcase.LegalCaseStatus;
 import com.lexflow.domain.legalcase.LegalCaseType;
@@ -59,6 +60,35 @@ class LegalAnalysisPersistenceIT extends AbstractPersistenceIT {
     }
 
     @Test
+    @DisplayName("o prompt da segunda checagem está semeado e a resposta guarda o resultado dela")
+    void shouldSeedTheVerificationPromptAndKeepItsResult() {
+        var prompt = promptVersionRepository
+                .findByPromptKeyAndActiveIsTrue("ANSWER_VERIFICATION")
+                .orElseThrow();
+        assertThat(prompt.getTemplateText())
+                .contains("### SISTEMA ###", "### USUARIO ###")
+                .contains("{{ANSWER}}", "{{CHUNKS}}", "{{QUESTION_KEY}}")
+                .contains("Não reescreva a resposta");
+
+        UUID legalCaseId = givenLegalCase();
+        var saved = responseRepository.saveAndFlush(AiAnalysisResponseMapper.toEntity(AiAnalysisResponse.deterministic(
+                        UUID.randomUUID(),
+                        legalCaseId,
+                        QuestionKey.CAN_SIGN_CONTRACT,
+                        "Resposta determinística.",
+                        NOW)
+                .markVerificationFailed("O trecho citado trata de outro assunto.")));
+        entityManager.flush();
+        entityManager.clear();
+
+        var reloaded = AiAnalysisResponseMapper.toDomain(
+                responseRepository.findById(saved.getId()).orElseThrow());
+        assertThat(reloaded.verificationStatus()).isEqualTo(VerificationStatus.FAILED);
+        assertThat(reloaded.verificationNotes()).isEqualTo("O trecho citado trata de outro assunto.");
+        assertThat(reloaded.confidenceScore().value()).isZero();
+    }
+
+    @Test
     @DisplayName("uma resposta do modelo sem versão de prompt é recusada pelo banco")
     void shouldRejectLlmAnswerWithoutPromptVersion() {
         UUID legalCaseId = givenLegalCase();
@@ -70,9 +100,9 @@ class LegalAnalysisPersistenceIT extends AbstractPersistenceIT {
                             """
                             INSERT INTO ai_analysis_responses
                                 (id, legal_case_id, question_key, answer_text, confidence_score, cited_chunks,
-                                 answer_source, model_version, prompt_version_id, created_at)
+                                 answer_source, model_version, prompt_version_id, verification_status, created_at)
                             VALUES (:id, :caseId, 'CAN_SIGN_CONTRACT', 'Resposta.', 0.8, CAST('[]' AS jsonb),
-                                    'LLM', 'claude-opus-5', NULL, :now)
+                                    'LLM', 'claude-opus-5', NULL, 'NOT_VERIFIED', :now)
                             """)
                     .setParameter("id", UUID.randomUUID())
                     .setParameter("caseId", legalCaseId)
@@ -94,9 +124,9 @@ class LegalAnalysisPersistenceIT extends AbstractPersistenceIT {
                             """
                             INSERT INTO ai_analysis_responses
                                 (id, legal_case_id, question_key, answer_text, confidence_score, cited_chunks,
-                                 answer_source, model_version, prompt_version_id, created_at)
+                                 answer_source, model_version, prompt_version_id, verification_status, created_at)
                             VALUES (:id, :caseId, 'HAS_SUFFICIENT_DOCUMENTATION', 'Documentação incompleta.', 1.0,
-                                    CAST('[]' AS jsonb), 'DETERMINISTIC', 'claude-opus-5', NULL, :now)
+                                    CAST('[]' AS jsonb), 'DETERMINISTIC', 'claude-opus-5', NULL, 'NOT_VERIFIED', :now)
                             """)
                     .setParameter("id", UUID.randomUUID())
                     .setParameter("caseId", legalCaseId)
