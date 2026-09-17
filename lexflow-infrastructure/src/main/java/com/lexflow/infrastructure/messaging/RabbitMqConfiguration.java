@@ -45,11 +45,12 @@ import org.springframework.context.annotation.Configuration;
  * <h2>Topologia</h2>
  *
  * <pre>
- * lexflow.events (topic) --[legal-case.received]--> lexflow.legal-case-received
+ * lexflow.events (topic) --[legal-case.received]-------------> lexflow.legal-case-received
+ *                        --[legal-case.decision-registered]--> lexflow.decision-registered
  *                                                         |
  *                                      esgotadas as tentativas (x-dead-letter-exchange)
  *                                                         v
- * lexflow.events.dlx (topic) --[legal-case.received]--> lexflow.legal-case-received.dlq
+ * lexflow.events.dlx (topic) --[mesma chave]--> lexflow.&lt;fila&gt;.dlq
  * </pre>
  */
 @Configuration(proxyBeanMethods = false)
@@ -69,6 +70,15 @@ public class RabbitMqConfiguration {
 
     /** Chave de roteamento do evento de demanda recebida. */
     public static final String LEGAL_CASE_RECEIVED_ROUTING_KEY = "legal-case.received";
+
+    /** Fila dos eventos de decisão humana (Prompt 15). */
+    public static final String DECISION_REGISTERED_QUEUE = "lexflow.decision-registered";
+
+    /** Dead-letter da fila de decisões. */
+    public static final String DECISION_REGISTERED_DLQ = DECISION_REGISTERED_QUEUE + ".dlq";
+
+    /** Chave de roteamento do evento de decisão registrada. */
+    public static final String DECISION_REGISTERED_ROUTING_KEY = "legal-case.decision-registered";
 
     @Bean
     public TopicExchange lexflowEventsExchange() {
@@ -111,6 +121,41 @@ public class RabbitMqConfiguration {
         return BindingBuilder.bind(legalCaseReceivedDeadLetterQueue())
                 .to(lexflowDeadLetterExchange())
                 .with(LEGAL_CASE_RECEIVED_ROUTING_KEY);
+    }
+
+    /**
+     * Fila das decisões humanas.
+     *
+     * <p>Ela é declarada agora, junto com a publicação (Prompt 15), e não junto com o primeiro
+     * consumidor: sem fila ligada à exchange, o broker descartaria em silêncio todo evento publicado
+     * antes de o consumidor existir — e uma decisão perdida é exatamente o que a auditoria do Prompt
+     * 16 não pode admitir.
+     */
+    @Bean
+    public Queue decisionRegisteredQueue() {
+        return QueueBuilder.durable(DECISION_REGISTERED_QUEUE)
+                .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
+                .withArgument("x-dead-letter-routing-key", DECISION_REGISTERED_ROUTING_KEY)
+                .build();
+    }
+
+    @Bean
+    public Queue decisionRegisteredDeadLetterQueue() {
+        return QueueBuilder.durable(DECISION_REGISTERED_DLQ).build();
+    }
+
+    @Bean
+    public Binding decisionRegisteredBinding() {
+        return BindingBuilder.bind(decisionRegisteredQueue())
+                .to(lexflowEventsExchange())
+                .with(DECISION_REGISTERED_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding decisionRegisteredDeadLetterBinding() {
+        return BindingBuilder.bind(decisionRegisteredDeadLetterQueue())
+                .to(lexflowDeadLetterExchange())
+                .with(DECISION_REGISTERED_ROUTING_KEY);
     }
 
     /**

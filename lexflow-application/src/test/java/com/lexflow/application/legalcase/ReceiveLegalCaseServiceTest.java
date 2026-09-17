@@ -173,7 +173,10 @@ class ReceiveLegalCaseServiceTest {
     @Test
     @DisplayName("chave reservada por uma ingestão que não terminou resulta em conflito")
     void shouldRejectKeyReservedByUnfinishedIngestion() {
-        idempotencyStore.reserve("chave-presa", java.util.UUID.randomUUID());
+        idempotencyStore.reserve(
+                com.lexflow.application.idempotency.IdempotencyNamespace.LEGAL_CASE_INGESTION,
+                "chave-presa",
+                java.util.UUID.randomUUID());
 
         assertThatExceptionOfType(IdempotentRequestInProgressException.class)
                 .isThrownBy(() -> service.receive(command("chave-presa", upload("contrato.pdf", "a"))));

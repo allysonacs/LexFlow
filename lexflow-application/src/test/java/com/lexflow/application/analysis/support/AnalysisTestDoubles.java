@@ -86,6 +86,11 @@ Responda somente com um objeto JSON no formato definido, com "question_key" igua
         }
 
         @Override
+        public void deleteByLegalCaseId(UUID legalCaseId) {
+            responses.keySet().removeIf(key -> key.startsWith(legalCaseId + "|"));
+        }
+
+        @Override
         public List<AiAnalysisResponse> findByLegalCaseId(UUID legalCaseId) {
             return responses.values().stream()
                     .filter(response -> response.legalCaseId().equals(legalCaseId))

@@ -1,5 +1,7 @@
 package com.lexflow.domain.legalcase;
 
+import com.lexflow.domain.exception.UnknownLegalCaseStatusException;
+
 /**
  * Situação de uma demanda jurídica ao longo do pipeline (seção 4 da base de conhecimento).
  *
@@ -38,5 +40,28 @@ public enum LegalCaseStatus {
     /** Indica se este é um estado terminal, do qual não sai nenhuma transição. */
     public boolean isTerminal() {
         return this == CLOSED;
+    }
+
+    /**
+     * Converte o texto recebido de um cliente externo no status correspondente.
+     *
+     * <p>Fica no domínio, e não no controller, pelo mesmo motivo de {@link LegalCaseType#of}: um
+     * valor desconhecido é recusado da mesma forma em qualquer ponto de entrada.
+     *
+     * @throws UnknownLegalCaseStatusException se o valor não corresponder a nenhum status
+     */
+    public static LegalCaseStatus of(String value) {
+        String normalized = value == null ? "" : value.trim().toUpperCase(java.util.Locale.ROOT);
+        return java.util.Arrays.stream(values())
+                .filter(status -> status.name().equals(normalized))
+                .findFirst()
+                .orElseThrow(() -> new UnknownLegalCaseStatusException(value, supportedValues()));
+    }
+
+    /** Nomes aceitos, na ordem declarada, para compor mensagens de erro. */
+    public static java.util.Set<String> supportedValues() {
+        return java.util.Arrays.stream(values())
+                .map(Enum::name)
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
     }
 }

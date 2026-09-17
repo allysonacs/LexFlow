@@ -91,23 +91,30 @@ Responda somente com um objeto JSON que siga exatamente o schema definido: todos
         }
     }
 
-    /** Alertas em memória. */
+    /**
+     * Alertas em memória.
+     *
+     * <p>Gravar de novo o mesmo alerta atualiza a linha, como o {@code save} do JPA: é assim que a
+     * resolução de um alerta é registrada, e não como um alerta novo.
+     */
     public static final class InMemoryLegalCaseAlertRepository implements LegalCaseAlertRepository {
 
-        private final List<LegalCaseAlert> alerts = new ArrayList<>();
+        private final Map<UUID, LegalCaseAlert> alerts = new LinkedHashMap<>();
 
         @Override
         public void save(LegalCaseAlert alert) {
-            alerts.add(alert);
+            alerts.put(alert.id(), alert);
         }
 
         @Override
         public List<LegalCaseAlert> findByLegalCaseId(UUID legalCaseId) {
-            return alerts.stream().filter(alert -> alert.legalCaseId().equals(legalCaseId)).toList();
+            return alerts.values().stream()
+                    .filter(alert -> alert.legalCaseId().equals(legalCaseId))
+                    .toList();
         }
 
         public List<LegalCaseAlert> all() {
-            return List.copyOf(alerts);
+            return List.copyOf(alerts.values());
         }
     }
 

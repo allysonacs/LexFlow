@@ -20,4 +20,13 @@ public interface AiAnalysisResponseRepository {
     List<AiAnalysisResponse> findByLegalCaseId(UUID legalCaseId);
 
     Optional<AiAnalysisResponse> findByLegalCaseIdAndQuestionKey(UUID legalCaseId, QuestionKey questionKey);
+
+    /**
+     * Apaga as respostas de uma demanda.
+     *
+     * <p>Usado quando a documentação é reenviada (Prompt 15): as respostas foram dadas sobre uma
+     * documentação que mudou, e mantê-las faria o revisor ler uma análise que não corresponde mais
+     * ao que está anexado.
+     */
+    void deleteByLegalCaseId(UUID legalCaseId);
 }

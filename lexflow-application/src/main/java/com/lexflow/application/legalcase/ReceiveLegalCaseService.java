@@ -2,8 +2,12 @@ package com.lexflow.application.legalcase;
 
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.DocumentStoragePort;
+import com.lexflow.application.document.StoreDocumentsService;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.application.idempotency.IdempotencyNamespace;
+import com.lexflow.application.idempotency.IdempotentOperation;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.transaction.TransactionRunner;
 import com.lexflow.domain.document.Document;
 import com.lexflow.domain.document.DocumentFormat;
@@ -51,8 +55,8 @@ public class ReceiveLegalCaseService {
     private final DocumentRepository documentRepository;
     private final LegalCaseStatusHistoryRepository statusHistoryRepository;
     private final LegalCaseStatusTransitionService statusTransitionService;
-    private final DocumentStoragePort documentStorage;
-    private final LegalCaseIngestionIdempotencyStore idempotencyStore;
+    private final StoreDocumentsService storeDocumentsService;
+    private final IdempotentOperationStore idempotencyStore;
     private final LegalCaseReceivedEventPublisher eventPublisher;
     private final TransactionRunner transactionRunner;
     private final Clock clock;
@@ -64,7 +68,7 @@ public class ReceiveLegalCaseService {
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             LegalCaseStatusTransitionService statusTransitionService,
             DocumentStoragePort documentStorage,
-            LegalCaseIngestionIdempotencyStore idempotencyStore,
+            IdempotentOperationStore idempotencyStore,
             LegalCaseReceivedEventPublisher eventPublisher,
             TransactionRunner transactionRunner,
             Clock clock,
@@ -75,7 +79,8 @@ public class ReceiveLegalCaseService {
                 Objects.requireNonNull(statusHistoryRepository, "statusHistoryRepository não pode ser nulo");
         this.statusTransitionService =
                 Objects.requireNonNull(statusTransitionService, "statusTransitionService não pode ser nulo");
-        this.documentStorage = Objects.requireNonNull(documentStorage, "documentStorage não pode ser nulo");
+        this.storeDocumentsService = new StoreDocumentsService(
+                Objects.requireNonNull(documentStorage, "documentStorage não pode ser nulo"), idGenerator);
         this.idempotencyStore = Objects.requireNonNull(idempotencyStore, "idempotencyStore não pode ser nulo");
         this.eventPublisher = Objects.requireNonNull(eventPublisher, "eventPublisher não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
@@ -103,7 +108,8 @@ public class ReceiveLegalCaseService {
         UUID legalCaseId = idGenerator.get();
 
         if (command.hasIdempotencyKey()) {
-            Optional<IdempotentIngestion> existing = idempotencyStore.reserve(command.idempotencyKey(), legalCaseId);
+            Optional<IdempotentOperation> existing = idempotencyStore.reserve(
+                    IdempotencyNamespace.LEGAL_CASE_INGESTION, command.idempotencyKey(), legalCaseId);
             if (existing.isPresent()) {
                 return replay(existing.get());
             }
@@ -124,14 +130,14 @@ public class ReceiveLegalCaseService {
         LegalCaseStatusTransitionResult transition = statusTransitionService.registerInitialStatus(
                 legalCase, LegalCaseStatusHistoryEntry.SYSTEM_ACTOR, INITIAL_STATUS_REASON);
 
-        List<Document> documents = storeDocuments(legalCaseId, command.documents(), formats, receivedAt);
+        List<Document> documents = storeDocumentsService.store(legalCaseId, command.documents(), formats, receivedAt);
 
         transactionRunner.runInTransaction(() -> {
             legalCaseRepository.save(transition.legalCase());
             statusHistoryRepository.save(transition.historyEntry());
             documentRepository.saveAll(documents);
             if (command.hasIdempotencyKey()) {
-                idempotencyStore.markCompleted(command.idempotencyKey());
+                idempotencyStore.markCompleted(IdempotencyNamespace.LEGAL_CASE_INGESTION, command.idempotencyKey());
             }
         });
 
@@ -153,52 +159,15 @@ public class ReceiveLegalCaseService {
      * segunda chamada não produz efeito nenhum, e não que ela acrescenta documentos à demanda
      * original.
      */
-    private ReceiveLegalCaseResult replay(IdempotentIngestion ingestion) {
+    private ReceiveLegalCaseResult replay(IdempotentOperation ingestion) {
         if (!ingestion.completed()) {
             throw new IdempotentRequestInProgressException(ingestion.idempotencyKey());
         }
         LegalCase legalCase = legalCaseRepository
-                .findById(ingestion.legalCaseId())
-                .orElseThrow(() -> new LegalCaseNotFoundException(ingestion.legalCaseId()));
-        List<Document> documents = documentRepository.findByLegalCaseId(ingestion.legalCaseId());
+                .findById(ingestion.aggregateId())
+                .orElseThrow(() -> new LegalCaseNotFoundException(ingestion.aggregateId()));
+        List<Document> documents = documentRepository.findByLegalCaseId(ingestion.aggregateId());
         return new ReceiveLegalCaseResult(new LegalCaseWithDocuments(legalCase, documents), true);
     }
 
-    /**
-     * Envia cada binário ao storage e monta os metadados correspondentes.
-     *
-     * <p>O checksum é calculado aqui, sobre o conteúdo recebido, e não delegado ao storage: é ele que
-     * sustenta a detecção de reenvio do mesmo arquivo, e essa garantia não pode depender do adapter
-     * que estiver em uso. Arquivos idênticos dentro da mesma requisição são gravados uma vez só.
-     */
-    private List<Document> storeDocuments(
-            UUID legalCaseId, List<DocumentUpload> uploads, List<DocumentFormat> formats, Instant uploadedAt) {
-        List<Document> documents = new ArrayList<>(uploads.size());
-        Set<Sha256Checksum> alreadyStored = new HashSet<>();
-        for (int index = 0; index < uploads.size(); index++) {
-            DocumentUpload upload = uploads.get(index);
-            Sha256Checksum checksum = Sha256Checksum.ofContent(upload.content());
-            // O mesmo arquivo enviado duas vezes na mesma requisição é um documento só: o banco tem
-            // índice único em (legal_case_id, checksum_sha256) e recusaria a segunda linha.
-            if (!alreadyStored.add(checksum)) {
-                continue;
-            }
-            UUID documentId = idGenerator.get();
-            String storagePath = documentStorage
-                    .store(legalCaseId, formats.get(index), checksum, upload)
-                    .storagePath();
-            documents.add(new Document(
-                    documentId,
-                    legalCaseId,
-                    upload.fileName(),
-                    storagePath,
-                    // Grava o tipo canônico do formato, e não o que o cliente declarou: assim um
-                    // "application/octet-stream" genérico não chega ao banco.
-                    formats.get(index).canonicalMimeType(),
-                    checksum,
-                    uploadedAt,
-                    upload.documentType()));
-        }
-        return List.copyOf(documents);
-    }
 }

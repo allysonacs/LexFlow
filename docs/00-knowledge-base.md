@@ -87,7 +87,8 @@ Responsável por cada transição:
 | `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação da classificação e da geração do checklist (Prompts 07, 08 e 09) |
 | `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11), no mesmo consumidor da fila, quando nenhum alerta está em aberto. Com alerta, a demanda permanece em `EXTRACTING` |
 | `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` | cadeia de prompts (Prompt 13), quando todas as perguntas aplicáveis foram respondidas e nenhum alerta está em aberto |
-| `PENDING_HUMAN_REVIEW → APPROVED \| REJECTED \| RETURNED_FOR_CORRECTION` | revisão humana (Prompt 15) |
+| `PENDING_HUMAN_REVIEW → APPROVED \| REJECTED \| RETURNED_FOR_CORRECTION` | registro da decisão humana (`POST /api/v1/legal-cases/{id}/decisions`, Prompt 15) |
+| `RETURNED_FOR_CORRECTION → RECEIVED` | reenvio de documentação (`POST /api/v1/legal-cases/{id}/documents`, Prompt 15) |
 
 ---
 
@@ -355,7 +356,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 - Toda mensagem consumida da fila carrega uma `idempotency_key`.
 - Antes de processar, verificar existência da chave em `processing_events`; se já processada, ignorar (log, não erro).
 - Endpoints de escrita que podem ser re-chamados (ex.: registrar decisão) devem aceitar uma chave de idempotência do cliente.
-- Na ingestão, a chave vem no cabeçalho `Idempotency-Key` e é gravada em `processing_events` com o prefixo `legal-case-ingestion:`, para nunca colidir com a chave de uma mensagem de fila. Um reenvio com a mesma chave devolve `201` com a demanda original.
+- A chave do cliente vem no cabeçalho `Idempotency-Key` e é gravada em `processing_events` com o prefixo do seu escopo (`IdempotencyNamespace`): `legal-case-ingestion:` na ingestão e `legal-case-decision:` na decisão humana. O prefixo é o que impede que a mesma chave, usada em dois endpoints ou por uma mensagem de fila, seja confundida com uma repetição. Um reenvio com a mesma chave devolve `201` com o resultado original.
 - A chave de um evento de fila é derivada do próprio evento (`LEGAL_CASE_RECEIVED:{eventId}`), e não da chave enviada pelo cliente.
 - Estados de um evento em `processing_events`: `IN_PROGRESS`, `PROCESSED` ou `FAILED`. Um evento `FAILED` pode ser reservado de novo, e um `IN_PROGRESS` em outra réplica é descartado.
 - A marca de falha é gravada fora da transação do processamento, porque um rollback apagaria o próprio registro da falha.
@@ -557,3 +558,15 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Se a própria checagem falhar.** Saída fora do formato ou recusa deixam a resposta em `NOT_VERIFIED`: a checagem é uma camada extra e não pode impedir a demanda de chegar ao revisor, e "não verificada" é uma informação honesta. Provedor indisponível sobe como exceção, e a mensagem volta para a fila.
 - **Trecho citado que sumiu.** Se a fonte foi reindexada e o trecho citado não existe mais, a resposta vai para `FAILED`: a fundamentação não pôde ser conferida.
 - **Configuração.** `lexflow.pipeline.self-verification.enabled` liga a etapa e `question-keys` amplia a lista de perguntas críticas; em branco vale o conjunto mínimo da seção 10, item 4. Desligada, as respostas chegam ao revisor como `NOT_VERIFIED` — o que é diferente de esconder a etapa.
+
+**Revisão humana e decisão (Prompt 15)**
+- **Endpoints novos:**
+  - `GET /api/v1/legal-cases?status=PENDING_HUMAN_REVIEW`: fila de revisão, paginada e em ordem de chegada;
+  - `GET /api/v1/legal-cases/{id}/analysis`: cada pergunta respondida com resposta, confiança, origem, resultado da segunda checagem e o **texto completo** dos trechos citados, mais os alertas em aberto e as decisões já registradas;
+  - `POST /api/v1/legal-cases/{id}/decisions`: registra a decisão, com suporte a `Idempotency-Key`;
+  - `POST /api/v1/legal-cases/{id}/documents`: reenvio de documentação de uma demanda devolvida.
+- **Identificação de quem decide.** Enquanto não há provedor de identidade, o responsável vem do cabeçalho `X-User-Id` (ou do corpo). **Isso identifica, mas não autentica**: qualquer cliente pode informar qualquer valor. A troca fica contida no controller e na `SecurityConfiguration`.
+- **Decisão e transição são uma operação só.** Gravadas na mesma transação: decisão sem transição deixaria a demanda parada em revisão para sempre; transição sem decisão apagaria quem decidiu. Uma segunda decisão na mesma demanda é recusada pela máquina de estados (`409`).
+- **Devolução exige comentários**, já no construtor de `Decision`: devolver sem dizer o que falta não ajuda ninguém.
+- **Reabertura.** O reenvio de documentação devolve a demanda a `RECEIVED` e a deixa em condição de ser analisada de novo: as respostas anteriores da IA são descartadas (falavam de outra documentação), os alertas em aberto são resolvidos (é o reenvio que responde a eles) e o evento `LEGAL_CASE_RECEIVED` é republicado com novo identificador. Os documentos já anexados permanecem; um arquivo idêntico a um já anexado é ignorado.
+- **Evento.** `DECISION_REGISTERED` é publicado na exchange `lexflow.events`, com a chave `legal-case.decision-registered`, e a fila `lexflow.decision-registered` já é declarada — sem fila ligada à exchange, o broker descartaria em silêncio os eventos publicados antes de existir consumidor. O evento leva identificadores e metadados, nunca o comentário da decisão.

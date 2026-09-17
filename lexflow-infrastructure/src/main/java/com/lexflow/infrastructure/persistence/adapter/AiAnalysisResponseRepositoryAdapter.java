@@ -34,6 +34,11 @@ public class AiAnalysisResponseRepositoryAdapter implements AiAnalysisResponseRe
     }
 
     @Override
+    public void deleteByLegalCaseId(UUID legalCaseId) {
+        jpaRepository.deleteAll(jpaRepository.findByLegalCaseId(legalCaseId));
+    }
+
+    @Override
     public Optional<AiAnalysisResponse> findByLegalCaseIdAndQuestionKey(UUID legalCaseId, QuestionKey questionKey) {
         return jpaRepository
                 .findByLegalCaseIdAndQuestionKey(legalCaseId, questionKey)

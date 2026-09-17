@@ -41,10 +41,11 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 12 | Base normativa e RAG (pgvector) | concluído |
 | 13 | Orquestração do prompt chain (respostas às perguntas jurídicas) | concluído |
 | 14 | Segunda checagem (self-verification) | concluído |
-| 15 | API de revisão humana e decisão | próximo |
-| 16–19 | Auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 15 | API de revisão humana e decisão | concluído |
+| 16 | Log de auditoria imutável | próximo |
+| 17–19 | Resiliência, observabilidade e dataset de regressão | pendentes |
 
-Hoje o pipeline vai da ingestão até as respostas da IA, prontas para o revisor humano:
+Hoje o fluxo está completo da ingestão à decisão humana:
 
 ```
 POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING ──► AI_ANALYSIS_IN_PROGRESS ──► PENDING_HUMAN_REVIEW
@@ -60,6 +61,11 @@ GET /api/v1/legal-cases/{id}/checklist ──► HAS_SUFFICIENT_DOCUMENTATION, p
 
 POST /api/v1/knowledge-base/sources ──► norma dividida em trechos ──► embeddings ──► pgvector
                                         (é daqui que saem os trechos citados nas respostas)
+
+GET  /api/v1/legal-cases?status=PENDING_HUMAN_REVIEW ──► fila de revisão
+GET  /api/v1/legal-cases/{id}/analysis ──────────────► respostas, confiança e o texto das fontes
+POST /api/v1/legal-cases/{id}/decisions ─────────────► APPROVED | REJECTED | RETURNED_FOR_CORRECTION
+POST /api/v1/legal-cases/{id}/documents ─────────────► reenvio: a demanda volta para RECEIVED
 ```
 
 As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
@@ -430,6 +436,33 @@ Uma camada extra contra a alucinação residual. Para as perguntas mais crítica
 - **Só o que faz sentido verificar.** Respostas determinísticas (cujo fundamento é uma regra de código), respostas que declaram "informação não encontrada na base normativa" e perguntas não críticas não gastam uma chamada a mais.
 - **Configurável.** `LEXFLOW_SELF_VERIFICATION_ENABLED=false` desliga a etapa, e `LEXFLOW_SELF_VERIFICATION_QUESTIONS` amplia a lista de perguntas verificadas. Desligada, as respostas chegam como `NOT_VERIFIED` — o revisor vê que a checagem não aconteceu, em vez de supor que ela passou.
 
+### Revisão humana e decisão (`lexflow-application` e `lexflow-api`)
+
+É aqui que o princípio do projeto se materializa: a API mostra o que a IA respondeu — com a fonte e a confiança — e grava a decisão de uma pessoa.
+
+| Endpoint | O que faz |
+|---|---|
+| `GET /api/v1/legal-cases?status=PENDING_HUMAN_REVIEW` | Fila de revisão, paginada e em ordem de chegada |
+| `GET /api/v1/legal-cases/{id}/analysis` | Cada pergunta com resposta, confiança, origem, resultado da segunda checagem e o **texto completo** dos trechos citados |
+| `POST /api/v1/legal-cases/{id}/decisions` | Registra a decisão, com `Idempotency-Key` |
+| `POST /api/v1/legal-cases/{id}/documents` | Reenvio de documentação: a demanda devolvida volta para `RECEIVED` |
+
+```bash
+curl -X POST http://localhost:8080/api/v1/legal-cases/$ID/decisions \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Id: ana.silva' \
+  -H 'Idempotency-Key: decisao-4711' \
+  -d '{"decisionType":"RETURNED_FOR_CORRECTION","comments":"Falta o parecer financeiro assinado."}'
+```
+
+- **A fonte vai junto da resposta.** O endpoint de análise devolve o texto de cada trecho citado, e não só o identificador: sem isso a interface só poderia mostrar a conclusão da IA, que é exatamente o que a seção 10 proíbe.
+- **Decisão e transição são uma operação só**, na mesma transação. Uma segunda decisão na mesma demanda é recusada pela máquina de estados, com `409`.
+- **Devolver exige explicar.** Uma devolução para correção sem comentários é recusada já no domínio.
+- **Reabrir é recomeçar.** O reenvio de documentação devolve a demanda a `RECEIVED`, descarta as respostas anteriores da IA (elas falavam de outra documentação), resolve os alertas em aberto e republica o evento. Os documentos já anexados permanecem.
+- **Idempotência.** A chave do cliente é gravada com o prefixo do seu escopo, então a mesma chave usada na ingestão e em uma decisão não se confunde.
+
+> **Limitação conhecida.** Quem decide é identificado pelo cabeçalho `X-User-Id`. Isso identifica, mas **não autentica**: qualquer cliente pode informar qualquer valor. A troca por um usuário autenticado fica contida no controller e na `SecurityConfiguration`.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -541,6 +574,8 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Respostas roteirizadas.** Cada teste pode enfileirar respostas próprias.
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
+
+A revisão humana é coberta em `RegisterDecisionServiceTest` e `ResubmitDocumentationServiceTest` (os três desfechos, a idempotência por escopo, a devolução sem comentários e a reabertura) e, de ponta a ponta, em `LegalCaseReviewIT`, onde o critério de aceite do Prompt 15 é reenviar a mesma decisão com a mesma `Idempotency-Key` sem gerar duas linhas em `decisions` nem duas transições.
 
 A segunda checagem é coberta em `VerifyAiAnalysisResponseUseCaseTest` (os dois vereditos, a checagem inconclusiva, o trecho que sumiu da base e as respostas que não devem ser verificadas) e, de ponta a ponta, em `LegalCaseAnalysisIT`, onde o critério de aceite do Prompt 14 é uma resposta deliberadamente não sustentada virando `FAILED` com confiança zerada.
 

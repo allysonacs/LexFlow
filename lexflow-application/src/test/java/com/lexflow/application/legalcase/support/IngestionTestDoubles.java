@@ -5,18 +5,22 @@ import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.document.DocumentUpload;
 import com.lexflow.application.document.StoredDocument;
 import com.lexflow.application.exception.DocumentNotFoundInStorageException;
-import com.lexflow.application.legalcase.IdempotentIngestion;
-import com.lexflow.application.legalcase.LegalCaseIngestionIdempotencyStore;
+import com.lexflow.application.idempotency.IdempotencyNamespace;
+import com.lexflow.application.idempotency.IdempotentOperation;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.legalcase.LegalCaseReceivedEvent;
 import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
 import com.lexflow.application.legalcase.LegalCaseRepository;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryEntry;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryRepository;
+import com.lexflow.application.pagination.PageQuery;
+import com.lexflow.application.pagination.PageResult;
 import com.lexflow.application.transaction.TransactionRunner;
 import com.lexflow.domain.document.Document;
 import com.lexflow.domain.document.DocumentFormat;
 import com.lexflow.domain.document.Sha256Checksum;
 import com.lexflow.domain.legalcase.LegalCase;
+import com.lexflow.domain.legalcase.LegalCaseStatus;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,6 +55,17 @@ public final class IngestionTestDoubles {
         @Override
         public Optional<LegalCase> findById(UUID id) {
             return Optional.ofNullable(storage.get(id));
+        }
+
+        @Override
+        public PageResult<LegalCase> findAll(LegalCaseStatus status, PageQuery pageQuery) {
+            List<LegalCase> filtered = storage.values().stream()
+                    .filter(legalCase -> status == null || legalCase.status() == status)
+                    .sorted(java.util.Comparator.comparing(LegalCase::createdAt).thenComparing(LegalCase::id))
+                    .toList();
+            int from = Math.min(pageQuery.page() * pageQuery.size(), filtered.size());
+            int to = Math.min(from + pageQuery.size(), filtered.size());
+            return new PageResult<>(filtered.subList(from, to), pageQuery.page(), pageQuery.size(), filtered.size());
         }
 
         public int count() {
@@ -143,28 +158,38 @@ public final class IngestionTestDoubles {
         }
     }
 
-    /** Controle de idempotência em memória, com a mesma semântica do índice único do banco. */
-    public static final class InMemoryIdempotencyStore implements LegalCaseIngestionIdempotencyStore {
+    /**
+     * Controle de idempotência em memória, com a mesma semântica do índice único do banco.
+     *
+     * <p>Guarda a chave já prefixada pelo namespace, como o banco faria: é isso que garante que a
+     * mesma chave usada em dois endpoints diferentes não seja confundida com uma repetição.
+     */
+    public static final class InMemoryIdempotencyStore implements IdempotentOperationStore {
 
-        private final Map<String, IdempotentIngestion> reservations = new LinkedHashMap<>();
+        private final Map<String, IdempotentOperation> reservations = new LinkedHashMap<>();
 
         @Override
-        public Optional<IdempotentIngestion> reserve(String idempotencyKey, UUID legalCaseId) {
-            IdempotentIngestion existing = reservations.get(idempotencyKey);
+        public Optional<IdempotentOperation> reserve(
+                IdempotencyNamespace namespace, String idempotencyKey, UUID aggregateId) {
+            String storedKey = namespace.storedKey(idempotencyKey);
+            IdempotentOperation existing = reservations.get(storedKey);
             if (existing != null) {
                 return Optional.of(existing);
             }
-            reservations.put(idempotencyKey, new IdempotentIngestion(idempotencyKey, legalCaseId, false));
+            reservations.put(storedKey, new IdempotentOperation(namespace, idempotencyKey, aggregateId, false));
             return Optional.empty();
         }
 
         @Override
-        public void markCompleted(String idempotencyKey) {
-            IdempotentIngestion reserved = reservations.get(idempotencyKey);
+        public void markCompleted(IdempotencyNamespace namespace, String idempotencyKey) {
+            String storedKey = namespace.storedKey(idempotencyKey);
+            IdempotentOperation reserved = reservations.get(storedKey);
             if (reserved == null) {
                 throw new IllegalStateException("chave não reservada: " + idempotencyKey);
             }
-            reservations.put(idempotencyKey, new IdempotentIngestion(idempotencyKey, reserved.legalCaseId(), true));
+            reservations.put(
+                    storedKey,
+                    new IdempotentOperation(namespace, idempotencyKey, reserved.aggregateId(), true));
         }
 
         public int size() {

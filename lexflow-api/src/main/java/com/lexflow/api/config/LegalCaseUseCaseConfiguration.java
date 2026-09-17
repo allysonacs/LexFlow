@@ -22,7 +22,7 @@ import com.lexflow.application.llm.LlmClientPort;
 import com.lexflow.application.llm.StructuredOutputValidator;
 import com.lexflow.application.prompt.PromptVersionRepository;
 import com.lexflow.application.legalcase.FindLegalCaseService;
-import com.lexflow.application.legalcase.LegalCaseIngestionIdempotencyStore;
+import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
 import com.lexflow.application.legalcase.LegalCaseRepository;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryRepository;
@@ -68,7 +68,7 @@ public class LegalCaseUseCaseConfiguration {
             LegalCaseStatusHistoryRepository statusHistoryRepository,
             LegalCaseStatusTransitionService statusTransitionService,
             DocumentStoragePort documentStorage,
-            LegalCaseIngestionIdempotencyStore idempotencyStore,
+            IdempotentOperationStore idempotencyStore,
             LegalCaseReceivedEventPublisher eventPublisher,
             TransactionRunner transactionRunner,
             Clock clock) {

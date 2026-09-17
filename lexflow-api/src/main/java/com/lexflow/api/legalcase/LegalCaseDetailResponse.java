@@ -30,7 +30,7 @@ public record LegalCaseDetailResponse(
     public record AlertResponse(
             UUID id, LegalCaseAlertType type, UUID documentId, String message, Instant createdAt, Instant resolvedAt) {
 
-        static AlertResponse from(LegalCaseAlert alert) {
+        public static AlertResponse from(LegalCaseAlert alert) {
             return new AlertResponse(
                     alert.id(), alert.type(), alert.documentId(), alert.message(), alert.createdAt(), alert.resolvedAt());
         }
