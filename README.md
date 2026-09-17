@@ -514,6 +514,8 @@ Uma revisão ponta a ponta das integrações externas, com o detalhe operacional
 
 O escopo é sempre fechado ao fim do bloco: um MDC que vaza faz a próxima demanda aparecer com o identificador da anterior — pior do que não ter correlação, porque parece informação boa.
 
+O escopo é aberto nos dois lados: no consumidor da fila e, nas requisições HTTP, pelo `LegalCaseCorrelationFilter`, que lê o identificador do caminho. A única rota sem correlação é a criação da demanda, onde o identificador só existe ao fim da requisição.
+
 **Métricas técnicas** (em `/actuator/prometheus`):
 
 | Métrica | O que responde |
