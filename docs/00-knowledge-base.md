@@ -44,6 +44,8 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Fato extraído | `AiExtractedFact` | Dados estruturados extraídos de um documento pela IA (sem opinião jurídica) |
 | Fonte normativa | `KnowledgeBaseSource` | Um documento de legislação/política interna indexado para RAG |
 | Trecho normativo | `KnowledgeBaseChunk` | Pedaço de uma fonte normativa, com embedding, usado na recuperação (RAG) |
+| Vetor de um texto | `Embedding` | Representação vetorial de um texto, usada para medir proximidade de assunto |
+| Trecho recuperado | `RetrievedChunk` | Trecho devolvido pela busca por similaridade, com a fonte e o grau de proximidade |
 | Resposta da IA | `AiAnalysisResponse` | Resposta estruturada da IA a uma pergunta jurídica específica, com fonte citada e confiança |
 | Versão de prompt | `PromptVersion` | Registro versionado do template de prompt usado, para rastreabilidade |
 | Decisão humana | `Decision` | Decisão final do responsável: aprovar, reprovar ou devolver |
@@ -257,6 +259,7 @@ Regra: `domain` não depende de nenhum framework. `application` depende só de `
 - **Storage de arquivos:** S3 em produção e MinIO em desenvolvimento e nos testes, via AWS SDK v2
 - **Extração de texto:** Apache Tika 3.x, com o Tesseract para OCR (idioma `por`). O Tesseract é um executável externo e precisa estar instalado no ambiente de execução.
 - **Cliente HTTP para LLM:** `WebClient` (Spring WebFlux, só como cliente; o servidor continua sendo o Tomcat), chamando a Messages API da Anthropic (`POST /v1/messages`). O modelo padrão é `claude-opus-5`.
+- **Embeddings (RAG):** provedor separado do LLM, também por `WebClient`, no formato `POST /v1/embeddings` (`input`, `model`, `input_type`, `output_dimension`). O padrão é a Voyage AI, com o modelo `voyage-3-large` em 1536 dimensões. A justificativa da separação está na seção 14 (Prompt 12).
 - **Resiliência:** Resilience4j (circuit breaker, retry, timeout, bulkhead), configurado em `resilience4j.*.instances.<nome>` no `application.yml`
 - **Observabilidade:** Micrometer + OpenTelemetry
 - **Testes:** JUnit 5, AssertJ, Awaitility e Testcontainers (PostgreSQL com pgvector, RabbitMQ, MinIO). Os testes de OCR exigem o Tesseract instalado.
@@ -302,7 +305,7 @@ Detalhamento (Prompt 09):
 Fluxo em cadeia (prompt chaining), nunca uma única chamada monolítica:
 
 1. **Extração estruturada** (`AiExtractedFact`) — o modelo extrai fatos do documento em JSON. Sem opinião jurídica nesta etapa. Detalhes na seção 14 (Prompt 11): schema por tipo de demanda, prompt versionado, dupla validação, uma única nova tentativa e alerta quando ela também falha.
-2. **Recuperação normativa (RAG)** — para cada `question_key`, recuperar os `KnowledgeBaseChunk` mais relevantes via similaridade de embedding.
+2. **Recuperação normativa (RAG)** — para cada `question_key`, recuperar os `KnowledgeBaseChunk` mais relevantes via similaridade de embedding. Detalhes na seção 14 (Prompt 12): divisão determinística em trechos, embeddings por provedor dedicado, busca por distância de cosseno no pgvector e corte por similaridade mínima.
 3. **Resposta estruturada** — o modelo responde **apenas com base nos trechos recuperados**, no formato:
    ```json
    {
@@ -358,7 +361,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 ## 12. Segurança e LGPD
 
 - Dados de demandas jurídicas são sensíveis — controle de acesso por papel (ex.: `ANALYST`, `LEGAL_REVIEWER`, `ADMIN`).
-  - **Estado atual (Prompt 09):** só `/api/v1/admin/**` é protegido, por HTTP Basic, com o papel `ADMIN`, sem sessão e sem CSRF.
+  - **Estado atual (Prompts 09 e 12):** `/api/v1/admin/**` e `/api/v1/knowledge-base/**` são protegidos, por HTTP Basic, com o papel `ADMIN`, sem sessão e sem CSRF. A base normativa entra nessa lista porque indexar uma norma muda o fundamento de toda resposta futura da IA.
   - As credenciais vêm de `LEXFLOW_ADMIN_USERNAME` e `LEXFLOW_ADMIN_PASSWORD`; a senha pode ser informada em texto, e aí vira hash na inicialização, ou já como `{bcrypt}`. Em produção, as duas variáveis são obrigatórias.
   - As demais rotas seguem abertas até a escolha do provedor de identidade.
 - Nunca logar conteúdo integral de documentos, apenas metadados e hashes.
@@ -496,3 +499,26 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Alertas e avanço.** Os alertas ficam em `legal_case_alerts`, separados da auditoria, porque participam do fluxo. Com algum alerta em aberto, a demanda fica em `EXTRACTING`; sem nenhum, avança para `AI_ANALYSIS_IN_PROGRESS`. Os alertas aparecem no `GET /api/v1/legal-cases/{id}`; resolvê-los é tarefa da revisão humana (Prompt 15).
 - **Retomada.** Documentos com fatos ou com alerta não voltam ao LLM. Uma demanda já em `AI_ANALYSIS_IN_PROGRESS` faz a etapa ser considerada concluída.
 - **Testes.** Nenhum teste automatizado chama o LLM real. O gabarito do contrato de teste fica em `fixtures/facts/contrato-texto-nativo.gabarito.json`.
+
+**Base normativa e RAG (Prompt 12)**
+- **Só recupera texto.** Nada neste componente decide questão jurídica: ele divide normas em trechos, indexa e devolve os mais próximos de uma consulta. Quem responde é a cadeia de prompts (Prompt 13), e quem decide é o revisor humano.
+- **Provedor de embeddings separado do LLM.** A Anthropic não expõe endpoint de embeddings, e o modelo de vetores tem ciclo de vida próprio: trocá-lo obriga a reindexar toda a base. Por isso a porta `EmbeddingClientPort` é distinta da `LlmClientPort`, com o adapter `VoyageEmbeddingClient` em `lexflow-infrastructure.embedding`.
+  - O pedido informa `input_type`: `document` para um trecho indexado e `query` para uma pergunta. Os modelos atuais projetam os dois em regiões próximas do espaço vetorial, e é isso que faz uma pergunta curta encontrar um parágrafo longo de norma.
+  - A dimensão pedida ao provedor precisa ser igual à da coluna `vector` (1536). Um vetor de outra dimensão é recusado como pedido inválido, sem nova tentativa: é erro de configuração, não falha transitória.
+  - Proteções na instância `embeddings` do Resilience4j, no mesmo desenho do cliente LLM: bulkhead de 8 chamadas, 45 s por tentativa, circuito de janela 20 e retry de 3 tentativas com backoff de 1 s a 10 s.
+  - A chave vem de `LEXFLOW_EMBEDDINGS_API_KEY` (ou `VOYAGE_API_KEY`). Sem ela, a aplicação sobe e só a indexação e a recuperação falham.
+- **Divisão em trechos.** `TextChunker` fica no domínio porque é regra pura e precisa ser determinística: reindexar a mesma norma tem de produzir exatamente os mesmos trechos.
+  - A divisão vai do maior para o menor: parágrafos, depois frases e, por último, corte no limite — nesta ordem, para respeitar como uma norma se organiza.
+  - O padrão é 1200 caracteres por trecho, com 200 de sobreposição, para que uma regra na fronteira de dois trechos continue legível em pelo menos um deles.
+  - Mudar a política só afeta o que for indexado a partir dali; as fontes já indexadas mantêm a divisão antiga até serem reindexadas.
+- **Indexação.** `IngestKnowledgeBaseSourceService` divide, vetoriza e grava fonte e trechos na mesma transação; uma fonte sem trechos seria uma norma que existe no catálogo e nunca é recuperada. As chamadas ao provedor ficam fora da transação, pelo mesmo motivo do OCR (seção 11).
+  - Reindexar substitui: os trechos antigos são apagados antes de os novos entrarem, para a mesma norma não ser recuperada em duplicata.
+  - A fonte pode chegar como texto ou como arquivo; arquivos `.txt` e `.md` são lidos direto, e os demais formatos passam pelo mesmo extrator dos documentos das demandas, OCR incluído.
+- **Recuperação.** `KnowledgeBaseRetriever` vetoriza a consulta e pede ao banco os N trechos mais próximos. A busca é uma consulta nativa com o operador `<=>` do pgvector, que usa o índice HNSW criado na V1; JPQL não conhece esse operador. O vetor vai como texto e é convertido com `CAST(... AS vector)`, porque `::vector` seria lido como parâmetro pelo Hibernate.
+  - Cada trecho volta com o título e o tipo da fonte, e não só com o identificador: é assim que ele será citado ao revisor humano.
+  - Trechos abaixo de `min-similarity` (padrão 0,2) são descartados. A busca vetorial sempre devolve os N mais próximos, mesmo quando nenhum trata do assunto, e norma irrelevante no contexto é convite à alucinação: é preferível o modelo responder "informação não encontrada na base normativa".
+- **Endpoints novos**, todos com papel `ADMIN`:
+  - `POST /api/v1/knowledge-base/sources` (JSON ou multipart), `GET` da listagem paginada e `GET /{id}` com os trechos;
+  - `GET /api/v1/knowledge-base/search`, que mostra o que a busca devolveria para uma consulta, sem chamar o LLM — é ferramenta de conferência da base.
+- **Sem migration nova.** As tabelas `knowledge_base_sources` e `knowledge_base_chunks`, a extensão `vector` e o índice HNSW já vieram na `V1`.
+- **Testes.** Nenhum teste automatizado chama o provedor real de embeddings. Nos testes, o modelo é o `LexicalEmbeddingClient`: determinístico e lexical, ele reproduz a única propriedade de que a recuperação depende — textos sobre o mesmo assunto ficam próximos.

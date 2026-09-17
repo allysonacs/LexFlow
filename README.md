@@ -17,6 +17,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - Apache Tika 3.3 para extrair texto, com o Tesseract 5 para o OCR
 - Spring Security (HTTP Basic) para a API administrativa
 - Claude (Messages API da Anthropic) como LLM, chamado por `WebClient`, com Resilience4j (retry, circuit breaker, time limiter e bulkhead)
+- Voyage AI como provedor de embeddings da base normativa, no mesmo desenho de cliente e proteções
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -37,10 +38,11 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 09 | Checklist documental determinístico, com API administrativa das regras | concluído |
 | 10 | Cliente LLM isolado e resiliente (Messages API da Anthropic) | concluído |
 | 11 | Extração estruturada de fatos via LLM, com prompt versionado e alertas | concluído |
-| 12 | Base normativa e RAG (pgvector) | próximo |
-| 13–19 | Cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 12 | Base normativa e RAG (pgvector) | concluído |
+| 13 | Orquestração do prompt chain | próximo |
+| 14–19 | Verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
-Hoje o pipeline vai da ingestão até os fatos extraídos de cada documento. A única etapa que usa LLM é a extração de fatos:
+Hoje o pipeline vai da ingestão até os fatos extraídos de cada documento, e a base normativa já está pronta para fundamentar as respostas. A única etapa que usa LLM é a extração de fatos:
 
 ```
 POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING ─────────────► AI_ANALYSIS_IN_PROGRESS
@@ -52,6 +54,9 @@ POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING �
                                                                           longo demais: alerta, e a demanda fica em EXTRACTING
 
 GET /api/v1/legal-cases/{id}/checklist ──► HAS_SUFFICIENT_DOCUMENTATION, por regra determinística
+
+POST /api/v1/knowledge-base/sources ──► norma dividida em trechos ──► embeddings ──► pgvector
+                                        (a recuperação alimenta o Prompt 13)
 ```
 
 As decisões tomadas até aqui estão consolidadas na seção 14 da base de conhecimento.
@@ -337,6 +342,45 @@ Primeiro uso real do LLM no pipeline (seção 10, item 1): o `ExtractLegalFactsU
 - **Documentos sem texto.** Um documento ilegível ou sem texto não tem fatos e não segura a demanda: o problema dele já está registrado em `document_text_contents`.
 - **Desligar a etapa.** `LEXFLOW_FACT_EXTRACTION_ENABLED=false` desliga a extração de fatos, e a demanda para em `EXTRACTING` sem chamar o LLM. Isso é útil em ambientes sem `ANTHROPIC_API_KEY`: com a etapa ligada e sem chave, a mensagem vai para a dead-letter depois das tentativas.
 
+### Base normativa e RAG (`lexflow-domain`, `lexflow-application` e `lexflow-infrastructure`)
+
+A base normativa é o que permite a IA responder **citando a fonte** em vez de opinar. Este componente não decide nada juridicamente: ele divide normas em trechos, indexa e devolve os mais próximos de uma consulta. Quem responde é a cadeia de prompts (Prompt 13); quem decide é uma pessoa.
+
+**Como uma norma entra na base.**
+
+```bash
+# Como texto
+curl -u admin:lexflow-admin -X POST http://localhost:8080/api/v1/knowledge-base/sources \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Política de Alçadas","sourceType":"INTERNAL_POLICY","effectiveDate":"2026-01-01","text":"Art. 1º ..."}'
+
+# Como arquivo (PDF, DOCX, imagem, .txt ou .md)
+curl -u admin:lexflow-admin -X POST http://localhost:8080/api/v1/knowledge-base/sources \
+  -F 'title=Lei 14.133/2021' -F 'sourceType=LAW' -F 'file=@lei-14133.pdf'
+
+# O que a busca devolveria para uma pergunta (conferência; não chama o LLM)
+curl -u admin:lexflow-admin \
+  'http://localhost:8080/api/v1/knowledge-base/search?limit=5&query=assinatura+de+contrato+acima+de+cem+mil'
+```
+
+| Etapa | O que acontece |
+|---|---|
+| Divisão | `TextChunker`, no domínio: parágrafos, depois frases e, por último, corte no limite. Padrão de 1200 caracteres com 200 de sobreposição |
+| Vetorização | `EmbeddingClientPort`, com `input_type` `document` para trechos e `query` para perguntas |
+| Gravação | Fonte e trechos na mesma transação; as chamadas ao provedor ficam fora dela |
+| Recuperação | Consulta nativa com o operador `<=>` do pgvector, usando o índice HNSW da migration `V1` |
+
+- **A divisão é determinística.** Reindexar a mesma norma produz exatamente os mesmos trechos — sem isso, uma citação antiga deixaria de bater com o texto atual. Mudar a política de divisão só afeta o que for indexado a partir dali.
+- **Reindexar substitui.** Os trechos antigos são apagados antes de os novos entrarem, para a mesma norma não ser recuperada em duplicata.
+- **Cada trecho volta com a fonte.** Título e tipo acompanham o trecho, e não só o identificador: é assim que ele será citado ao revisor humano.
+- **Trechos irrelevantes são descartados.** A busca vetorial sempre devolve os N mais próximos, mesmo quando nenhum trata do assunto. Abaixo de `min-similarity` (padrão 0,2) o trecho não vai ao modelo: norma irrelevante no contexto é convite à alucinação, e é preferível o modelo responder "informação não encontrada na base normativa".
+- **Arquivos passam pelo extrator das demandas.** `.txt` e `.md` são lidos direto; PDF, DOCX e imagens usam o mesmo Tika com OCR.
+- **Restrito ao papel `ADMIN`.** Indexar uma norma muda o fundamento de toda resposta futura da IA.
+
+**Provedor de embeddings.** É uma integração separada do cliente LLM, com porta própria (`EmbeddingClientPort`): a Anthropic não expõe endpoint de embeddings, e o modelo de vetores tem ciclo de vida próprio — trocá-lo obriga a reindexar toda a base. O adapter padrão é o `VoyageEmbeddingClient` (`voyage-3-large`, 1536 dimensões), com as mesmas proteções do cliente LLM na instância `embeddings` do Resilience4j: bulkhead de 8 chamadas, 45 s por tentativa, circuito de janela 20 e retry de 3 tentativas com backoff de 1 s a 10 s. Um vetor de dimensão diferente da coluna do banco é recusado sem nova tentativa — é erro de configuração, não falha transitória.
+
+Sem `LEXFLOW_EMBEDDINGS_API_KEY` (ou `VOYAGE_API_KEY`) a aplicação sobe normalmente; só a indexação e a recuperação falham.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -449,6 +493,14 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
 
+A base normativa é coberta em três níveis, e **nenhum teste chama o provedor real de embeddings**:
+
+- **domínio** (`TextChunkerTest`, `EmbeddingTest`): a divisão respeita o limite, mantém a ordem, se sobrepõe e é determinística; a similaridade de cosseno e a imutabilidade do vetor;
+- **aplicação** (`KnowledgeBaseRagTest`): indexação, reindexação, corte por similaridade e recuperação, sem Docker;
+- **integração**: `KnowledgeBaseRetrievalIT` roda o critério de aceite do Prompt 12 contra o PostgreSQL real — três normas indexadas, e a consulta relacionada a uma delas traz os trechos certos entre os três primeiros. `VoyageEmbeddingClientIT` testa o cliente contra o WireMock (lotes, ordem, retry de 429, recusa de 400 e dimensão inesperada), e `KnowledgeBaseIT` cobre os endpoints com autenticação real.
+
+Nos testes, o modelo de embeddings é o `LexicalEmbeddingClient`: cada palavra soma um em uma dimensão do vetor. Não capta sinônimo nem paráfrase, mas reproduz a única propriedade de que a recuperação depende — textos sobre o mesmo assunto ficam próximos — e, sendo determinístico, o resultado do teste não depende de rede nem de chave de API.
+
 Os testes de extração (`TikaDocumentTextExtractorTest`, `LegalCaseClassificationExtractionIT` e `LegalCaseChecklistIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
 
 O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
@@ -512,6 +564,16 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_LLM_CIRCUIT_OPEN_WAIT` | Tempo com o circuito aberto (padrão `30s`) |
 | `LEXFLOW_LLM_MAX_CONCURRENT_CALLS` | Chamadas simultâneas ao LLM por réplica (padrão `16`) |
 | `LEXFLOW_LLM_REFUSAL_FALLBACK` | `default` para o provedor tentar outro modelo quando o pedido é recusado; vazio desliga |
+| `LEXFLOW_EMBEDDINGS_API_KEY` / `VOYAGE_API_KEY` | Chave do provedor de embeddings; sem ela, a indexação e a recuperação falham, mas a aplicação sobe |
+| `LEXFLOW_EMBEDDINGS_BASE_URL` | Endereço do provedor (padrão `https://api.voyageai.com`) |
+| `LEXFLOW_EMBEDDINGS_MODEL` | Modelo de embeddings (padrão `voyage-3-large`) |
+| `LEXFLOW_EMBEDDINGS_BATCH_SIZE` | Trechos por chamada ao provedor (padrão `32`) |
+| `LEXFLOW_EMBEDDINGS_TIMEOUT` / `_RESPONSE_TIMEOUT` | Tempo máximo por tentativa e na camada HTTP (padrão `45s` / `60s`) |
+| `LEXFLOW_EMBEDDINGS_MAX_ATTEMPTS` | Tentativas por chamada (padrão `3`) |
+| `LEXFLOW_EMBEDDINGS_MAX_CONCURRENT_CALLS` | Chamadas simultâneas por réplica (padrão `8`) |
+| `LEXFLOW_KB_CHUNK_MAX_CHARACTERS` / `_OVERLAP` | Tamanho e sobreposição dos trechos normativos (padrão `1200` / `200`) |
+| `LEXFLOW_KB_RETRIEVAL_LIMIT` | Trechos recuperados por pergunta jurídica (padrão `5`) |
+| `LEXFLOW_KB_MIN_SIMILARITY` | Similaridade mínima para um trecho ser levado ao modelo (padrão `0.2`) |
 | `LEXFLOW_FACT_EXTRACTION_ENABLED` | Liga a extração de fatos via LLM (padrão `true`); desligada, a demanda para em `EXTRACTING` |
 | `LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS` | Tamanho máximo do texto enviado por documento (padrão `400000`); acima disso, alerta |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |

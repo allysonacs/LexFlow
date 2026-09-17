@@ -20,6 +20,9 @@ public final class ApiErrorCodes {
     /** Storage de documentos indisponível ou recusando a operação. */
     public static final String STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE";
 
+    /** Provedor de embeddings indisponível ou recusando a operação (Prompt 12). */
+    public static final String EMBEDDINGS_UNAVAILABLE = "EMBEDDINGS_UNAVAILABLE";
+
     /** Arquivo maior do que o limite configurado. */
     public static final String PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE";
 

@@ -83,6 +83,28 @@ lexflow:
     # Quando o modelo recusa um pedido por política, o provedor tenta outro modelo na mesma chamada.
     # O modelo que respondeu fica registrado na resposta. Vazio desliga.
     refusal-fallback: ${LEXFLOW_LLM_REFUSAL_FALLBACK:default}
+  # Base normativa do RAG (Prompt 12). O provedor de embeddings é separado do LLM: a Anthropic não
+  # expõe endpoint de embeddings. Sem chave, a aplicação sobe e só a indexação e a recuperação falham.
+  embeddings:
+    base-url: ${LEXFLOW_EMBEDDINGS_BASE_URL:https://api.voyageai.com}
+    path: ${LEXFLOW_EMBEDDINGS_PATH:/v1/embeddings}
+    api-key: ${LEXFLOW_EMBEDDINGS_API_KEY:${VOYAGE_API_KEY:}}
+    model: ${LEXFLOW_EMBEDDINGS_MODEL:voyage-3-large}
+    # Precisa ser igual à dimensão da coluna vector da migration V1; mudar exige reindexar a base.
+    dimension: 1536
+    batch-size: ${LEXFLOW_EMBEDDINGS_BATCH_SIZE:32}
+    connect-timeout: 5s
+    response-timeout: ${LEXFLOW_EMBEDDINGS_RESPONSE_TIMEOUT:60s}
+    # Um trecho acima do limite do modelo é cortado pelo provedor, em vez de derrubar o lote inteiro.
+    truncate-input: true
+  knowledge-base:
+    # Divisão das fontes normativas em trechos. Alterar só afeta o que for indexado a partir daqui.
+    chunk-max-characters: ${LEXFLOW_KB_CHUNK_MAX_CHARACTERS:1200}
+    chunk-overlap-characters: ${LEXFLOW_KB_CHUNK_OVERLAP:200}
+    # Quantos trechos são levados ao modelo por pergunta jurídica (Prompt 13).
+    retrieval-limit: ${LEXFLOW_KB_RETRIEVAL_LIMIT:5}
+    # Trechos menos próximos que isso são descartados: norma irrelevante no contexto convida à alucinação.
+    min-similarity: ${LEXFLOW_KB_MIN_SIMILARITY:0.2}
   # Etapas do pipeline assíncrono.
   pipeline:
     fact-extraction:
@@ -107,6 +129,10 @@ resilience4j:
         # Tempo máximo de cada tentativa. Uma resposta sem streaming com raciocínio pode levar minutos.
         timeout-duration: ${LEXFLOW_LLM_TIMEOUT:180s}
         cancel-running-future: true
+      embeddings:
+        # Embeddings são rápidos: um lote que passa disso indica provedor degradado.
+        timeout-duration: ${LEXFLOW_EMBEDDINGS_TIMEOUT:45s}
+        cancel-running-future: true
   retry:
     instances:
       llm:
@@ -120,6 +146,16 @@ resilience4j:
         # modelo e circuito aberto não são repetidos.
         retry-exceptions:
           - com.lexflow.application.llm.LlmUnavailableException
+          - java.util.concurrent.TimeoutException
+          - io.github.resilience4j.bulkhead.BulkheadFullException
+      embeddings:
+        max-attempts: ${LEXFLOW_EMBEDDINGS_MAX_ATTEMPTS:3}
+        wait-duration: 1s
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        exponential-max-wait-duration: 10s
+        retry-exceptions:
+          - com.lexflow.application.knowledge.EmbeddingUnavailableException
           - java.util.concurrent.TimeoutException
           - io.github.resilience4j.bulkhead.BulkheadFullException
   circuitbreaker:
@@ -142,12 +178,31 @@ resilience4j:
         ignore-exceptions:
           - com.lexflow.application.llm.LlmRequestRejectedException
           - io.github.resilience4j.bulkhead.BulkheadFullException
+      embeddings:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 30s
+        slow-call-rate-threshold: 80
+        wait-duration-in-open-state: ${LEXFLOW_EMBEDDINGS_CIRCUIT_OPEN_WAIT:30s}
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-exceptions:
+          - com.lexflow.application.knowledge.EmbeddingUnavailableException
+          - java.util.concurrent.TimeoutException
+        ignore-exceptions:
+          - com.lexflow.application.knowledge.EmbeddingRequestRejectedException
+          - io.github.resilience4j.bulkhead.BulkheadFullException
   bulkhead:
     instances:
       llm:
         # Chamadas simultâneas ao LLM por réplica: o resto espera um pouco e, depois, falha como
         # indisponibilidade — a mensagem volta para a fila, sem travar o worker.
         max-concurrent-calls: ${LEXFLOW_LLM_MAX_CONCURRENT_CALLS:16}
+        max-wait-duration: 10s
+      embeddings:
+        max-concurrent-calls: ${LEXFLOW_EMBEDDINGS_MAX_CONCURRENT_CALLS:8}
         max-wait-duration: 10s
 
 server:

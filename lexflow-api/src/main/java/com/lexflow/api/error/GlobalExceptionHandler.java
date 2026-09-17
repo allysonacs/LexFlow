@@ -4,9 +4,11 @@ import com.lexflow.application.checklist.ChecklistRuleInUseException;
 import com.lexflow.application.checklist.DuplicateChecklistRuleException;
 import com.lexflow.application.exception.DocumentStorageException;
 import com.lexflow.application.exception.IdempotentRequestInProgressException;
+import com.lexflow.application.knowledge.EmbeddingUnavailableException;
 import com.lexflow.domain.exception.ChecklistRuleNotFoundException;
 import com.lexflow.domain.exception.DomainException;
 import com.lexflow.domain.exception.InvalidStatusTransitionException;
+import com.lexflow.domain.exception.KnowledgeBaseSourceNotFoundException;
 import com.lexflow.domain.exception.LegalCaseNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Clock;
@@ -46,8 +48,12 @@ public class GlobalExceptionHandler {
         this.clock = clock;
     }
 
-    /** Demanda ou regra de checklist inexistente. */
-    @ExceptionHandler({LegalCaseNotFoundException.class, ChecklistRuleNotFoundException.class})
+    /** Demanda, regra de checklist ou fonte normativa inexistente. */
+    @ExceptionHandler({
+        LegalCaseNotFoundException.class,
+        ChecklistRuleNotFoundException.class,
+        KnowledgeBaseSourceNotFoundException.class
+    })
     public ResponseEntity<ApiErrorResponse> handleNotFound(DomainException e, HttpServletRequest request) {
         return build(HttpStatus.NOT_FOUND, ApiErrorCodes.RESOURCE_NOT_FOUND, e.getMessage(), request);
     }
@@ -87,6 +93,23 @@ public class GlobalExceptionHandler {
                 HttpStatus.SERVICE_UNAVAILABLE,
                 ApiErrorCodes.STORAGE_UNAVAILABLE,
                 "Storage de documentos indisponível; tente novamente",
+                request);
+    }
+
+    /**
+     * Provedor de embeddings indisponível (Prompt 12).
+     *
+     * <p>Vira 503 pelo mesmo motivo do storage: a causa é uma dependência externa, e a indexação pode
+     * ser reenviada quando o provedor voltar. O detalhe fica no log.
+     */
+    @ExceptionHandler(EmbeddingUnavailableException.class)
+    public ResponseEntity<ApiErrorResponse> handleEmbeddingUnavailable(
+            EmbeddingUnavailableException e, HttpServletRequest request) {
+        log.error("Falha no provedor de embeddings em {} {}", request.getMethod(), request.getRequestURI(), e);
+        return build(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                ApiErrorCodes.EMBEDDINGS_UNAVAILABLE,
+                "Provedor de embeddings indisponível; tente novamente",
                 request);
     }
 

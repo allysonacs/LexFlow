@@ -1,5 +1,6 @@
 package com.lexflow.api;
 
+import com.lexflow.api.support.StubEmbeddingClientConfiguration;
 import com.lexflow.api.support.StubLlmClientConfiguration;
 import com.lexflow.infrastructure.testsupport.MinioTestcontainersConfiguration;
 import com.lexflow.infrastructure.testsupport.PostgresTestcontainersConfiguration;
@@ -17,7 +18,9 @@ import org.springframework.context.annotation.Import;
  * <p>O consumidor da fila sobe parado (ver {@link RabbitMqTestcontainersConfiguration}); quem quiser
  * exercitar o processamento assíncrono o inicia explicitamente.
  *
- * <p>O LLM é sempre o {@link com.lexflow.api.support.StubLlmClient}: nenhum teste chama o provedor real.
+ * <p>O LLM é sempre o {@link com.lexflow.api.support.StubLlmClient} e os embeddings vêm sempre do
+ * {@link com.lexflow.infrastructure.testsupport.LexicalEmbeddingClient}: nenhum teste chama um
+ * provedor externo.
  *
  * <p>Requer Docker em execução.
  */
@@ -26,6 +29,7 @@ import org.springframework.context.annotation.Import;
     PostgresTestcontainersConfiguration.class,
     MinioTestcontainersConfiguration.class,
     RabbitMqTestcontainersConfiguration.class,
-    StubLlmClientConfiguration.class
+    StubLlmClientConfiguration.class,
+    StubEmbeddingClientConfiguration.class
 })
 public abstract class AbstractApiIT {}
