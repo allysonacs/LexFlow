@@ -37,6 +37,9 @@ public class AiExtractedFactEntity {
     @Column(name = "model_version", nullable = false, length = 100)
     private String modelVersion;
 
+    @Column(name = "prompt_version_id", nullable = false)
+    private UUID promptVersionId;
+
     @Column(name = "extracted_at", nullable = false)
     private Instant extractedAt;
 
@@ -50,12 +53,14 @@ public class AiExtractedFactEntity {
             UUID documentId,
             String extractedJson,
             String modelVersion,
+            UUID promptVersionId,
             Instant extractedAt) {
         this.id = id;
         this.legalCaseId = legalCaseId;
         this.documentId = documentId;
         this.extractedJson = extractedJson;
         this.modelVersion = modelVersion;
+        this.promptVersionId = promptVersionId;
         this.extractedAt = extractedAt;
     }
 
@@ -77,6 +82,10 @@ public class AiExtractedFactEntity {
 
     public String getModelVersion() {
         return modelVersion;
+    }
+
+    public UUID getPromptVersionId() {
+        return promptVersionId;
     }
 
     public Instant getExtractedAt() {

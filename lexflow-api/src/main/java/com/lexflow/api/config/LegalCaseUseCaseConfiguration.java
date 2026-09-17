@@ -1,5 +1,6 @@
 package com.lexflow.api.config;
 
+import com.lexflow.application.alert.LegalCaseAlertRepository;
 import com.lexflow.application.checklist.ChecklistRuleRepository;
 import com.lexflow.application.checklist.DocumentChecklistItemRepository;
 import com.lexflow.application.checklist.DocumentChecklistService;
@@ -10,6 +11,11 @@ import com.lexflow.application.document.DocumentTextContentRepository;
 import com.lexflow.application.document.DocumentTextExtractor;
 import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.event.ProcessingEventStore;
+import com.lexflow.application.fact.AiExtractedFactRepository;
+import com.lexflow.application.fact.ExtractLegalFactsUseCase;
+import com.lexflow.application.llm.LlmClientPort;
+import com.lexflow.application.llm.StructuredOutputValidator;
+import com.lexflow.application.prompt.PromptVersionRepository;
 import com.lexflow.application.legalcase.FindLegalCaseService;
 import com.lexflow.application.legalcase.LegalCaseIngestionIdempotencyStore;
 import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
@@ -23,6 +29,7 @@ import com.lexflow.domain.classification.LegalCaseKeywordClassifier;
 import com.lexflow.domain.legalcase.LegalCaseStatusTransitionRules;
 import java.time.Clock;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -106,7 +113,50 @@ public class LegalCaseUseCaseConfiguration {
         return new ManageChecklistRulesService(ruleRepository, itemRepository, transactionRunner, UUID::randomUUID);
     }
 
-    /** Caso de uso disparado pelo consumo da fila (Prompts 07, 08 e 09). */
+    /**
+     * Extração estruturada de fatos via LLM (Prompt 11).
+     *
+     * @param maxDocumentCharacters documentos maiores recebem alerta em vez de serem enviados; o
+     *     padrão, cerca de 400 mil caracteres, fica bem abaixo da janela de contexto do modelo
+     */
+    @Bean
+    public ExtractLegalFactsUseCase extractLegalFactsUseCase(
+            LegalCaseRepository legalCaseRepository,
+            DocumentRepository documentRepository,
+            DocumentTextContentRepository textContentRepository,
+            AiExtractedFactRepository factRepository,
+            LegalCaseAlertRepository alertRepository,
+            PromptVersionRepository promptVersionRepository,
+            LlmClientPort llmClient,
+            StructuredOutputValidator structuredOutputValidator,
+            LegalCaseStatusTransitionService statusTransitionService,
+            LegalCaseStatusHistoryRepository statusHistoryRepository,
+            TransactionRunner transactionRunner,
+            Clock clock,
+            @Value("${lexflow.pipeline.fact-extraction.max-document-characters:400000}") int maxDocumentCharacters) {
+        return new ExtractLegalFactsUseCase(
+                legalCaseRepository,
+                documentRepository,
+                textContentRepository,
+                factRepository,
+                alertRepository,
+                promptVersionRepository,
+                llmClient,
+                structuredOutputValidator,
+                statusTransitionService,
+                statusHistoryRepository,
+                transactionRunner,
+                clock,
+                UUID::randomUUID,
+                maxDocumentCharacters);
+    }
+
+    /**
+     * Caso de uso disparado pelo consumo da fila (Prompts 07 a 11).
+     *
+     * @param factExtractionEnabled desligar faz a demanda parar em {@code EXTRACTING}, sem chamar o
+     *     LLM — útil em ambientes sem chave de API
+     */
     @Bean
     public ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService(
             LegalCaseRepository legalCaseRepository,
@@ -116,6 +166,8 @@ public class LegalCaseUseCaseConfiguration {
             LegalCaseKeywordClassifier classifier,
             DocumentChecklistService checklistService,
             ExtractDocumentTextService extractDocumentTextService,
+            ExtractLegalFactsUseCase extractLegalFactsUseCase,
+            @Value("${lexflow.pipeline.fact-extraction.enabled:true}") boolean factExtractionEnabled,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
         return new ProcessLegalCaseReceivedEventService(
@@ -126,13 +178,17 @@ public class LegalCaseUseCaseConfiguration {
                 classifier,
                 checklistService,
                 extractDocumentTextService,
+                extractLegalFactsUseCase,
+                factExtractionEnabled,
                 processingEventStore,
                 transactionRunner);
     }
 
     @Bean
     public FindLegalCaseService findLegalCaseService(
-            LegalCaseRepository legalCaseRepository, DocumentRepository documentRepository) {
-        return new FindLegalCaseService(legalCaseRepository, documentRepository);
+            LegalCaseRepository legalCaseRepository,
+            DocumentRepository documentRepository,
+            LegalCaseAlertRepository alertRepository) {
+        return new FindLegalCaseService(legalCaseRepository, documentRepository, alertRepository);
     }
 }

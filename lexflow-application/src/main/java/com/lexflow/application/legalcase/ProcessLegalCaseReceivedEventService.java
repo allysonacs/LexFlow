@@ -4,6 +4,8 @@ import com.lexflow.application.checklist.DocumentChecklistService;
 import com.lexflow.application.document.DocumentRepository;
 import com.lexflow.application.document.ExtractDocumentTextService;
 import com.lexflow.application.event.ProcessingEventStore;
+import com.lexflow.application.fact.ExtractLegalFactsUseCase;
+import com.lexflow.application.fact.FactExtractionResult;
 import com.lexflow.application.event.ProcessingReservation;
 import com.lexflow.application.transaction.TransactionRunner;
 import com.lexflow.domain.checklist.DocumentChecklist;
@@ -21,7 +23,7 @@ import java.util.UUID;
 
 /**
  * Caso de uso disparado pelo consumo de {@link LegalCaseReceivedEvent}: leva a demanda da caixa de
- * entrada até o texto extraído, com o checklist documental gerado, sem nenhuma chamada a LLM.
+ * entrada até os fatos extraídos, pronta para a análise da IA.
  *
  * <p>As etapas, na ordem:
  *
@@ -32,12 +34,14 @@ import java.util.UUID;
  *   <li><strong>{@code CLASSIFYING → EXTRACTING}</strong>;
  *   <li><strong>checklist documental</strong> (Prompt 09): os itens das regras do tipo são gerados e
  *       os documentos enviados são vinculados a eles, pelo tipo informado no upload;
- *   <li><strong>extração de texto</strong> de cada documento, nativa ou por OCR.
+ *   <li><strong>extração de texto</strong> de cada documento, nativa ou por OCR;
+ *   <li><strong>extração de fatos</strong> via LLM (Prompt 11), que leva a demanda a
+ *       {@code AI_ANALYSIS_IN_PROGRESS} — ou a deixa em {@code EXTRACTING}, com alerta, quando algum
+ *       documento precisa de atenção humana.
  * </ol>
  *
- * <p>A demanda <strong>permanece em {@code EXTRACTING}</strong> ao fim: a seção 4 só permite sair
- * dali para {@code AI_ANALYSIS_IN_PROGRESS}, e essa transição pertence à extração de fatos (Prompt
- * 11), que ainda compõe a mesma etapa. O texto gravado é o que ela vai consumir.
+ * <p>Até o Prompt 11 este fluxo não chamava LLM, e a extração de fatos pode ser desligada por
+ * configuração: nesse caso a demanda termina em {@code EXTRACTING}, como antes.
  *
  * <p><strong>A ordem das operações não é arbitrária.</strong> A reserva do evento vem antes de
  * qualquer escrita, para que uma entrega duplicada seja descartada sem efeito. As duas transições
@@ -48,7 +52,10 @@ import java.util.UUID;
  *
  * <p><strong>Retomada.</strong> Cada etapa olha o status atual antes de agir. Uma tentativa que
  * falhou durante a extração volta com a demanda já em {@code EXTRACTING}: a classificação não se
- * repete, o checklist só é sincronizado (nada é recriado) e só os documentos ainda sem texto são lidos.
+ * repete, o checklist só é sincronizado (nada é recriado), só os documentos ainda sem texto são lidos e
+ * só os documentos ainda sem fatos vão para o LLM. Uma demanda que já chegou a
+ * {@code AI_ANALYSIS_IN_PROGRESS} — a marca de "processado" falhou depois da transição — é tratada
+ * como concluída.
  */
 public class ProcessLegalCaseReceivedEventService {
 
@@ -63,6 +70,8 @@ public class ProcessLegalCaseReceivedEventService {
     private final LegalCaseKeywordClassifier classifier;
     private final DocumentChecklistService checklistService;
     private final ExtractDocumentTextService extractDocumentTextService;
+    private final ExtractLegalFactsUseCase extractLegalFactsUseCase;
+    private final boolean factExtractionEnabled;
     private final ProcessingEventStore processingEventStore;
     private final TransactionRunner transactionRunner;
 
@@ -74,6 +83,8 @@ public class ProcessLegalCaseReceivedEventService {
             LegalCaseKeywordClassifier classifier,
             DocumentChecklistService checklistService,
             ExtractDocumentTextService extractDocumentTextService,
+            ExtractLegalFactsUseCase extractLegalFactsUseCase,
+            boolean factExtractionEnabled,
             ProcessingEventStore processingEventStore,
             TransactionRunner transactionRunner) {
         this.legalCaseRepository = Objects.requireNonNull(legalCaseRepository, "legalCaseRepository não pode ser nulo");
@@ -86,6 +97,9 @@ public class ProcessLegalCaseReceivedEventService {
         this.checklistService = Objects.requireNonNull(checklistService, "checklistService não pode ser nulo");
         this.extractDocumentTextService =
                 Objects.requireNonNull(extractDocumentTextService, "extractDocumentTextService não pode ser nulo");
+        this.extractLegalFactsUseCase =
+                Objects.requireNonNull(extractLegalFactsUseCase, "extractLegalFactsUseCase não pode ser nulo");
+        this.factExtractionEnabled = factExtractionEnabled;
         this.processingEventStore = Objects.requireNonNull(processingEventStore, "processingEventStore não pode ser nulo");
         this.transactionRunner = Objects.requireNonNull(transactionRunner, "transactionRunner não pode ser nulo");
     }
@@ -101,6 +115,10 @@ public class ProcessLegalCaseReceivedEventService {
      * @throws com.lexflow.application.exception.DocumentStorageException se o storage falhar
      * @throws com.lexflow.application.exception.DocumentTextExtractionException se a extração falhar
      *     por um problema de ambiente
+     * @throws com.lexflow.application.llm.LlmUnavailableException se o provedor de LLM estiver
+     *     indisponível
+     * @throws com.lexflow.application.llm.LlmRequestRejectedException se o provedor recusar o pedido
+     *     (configuração)
      */
     public LegalCaseProcessingResult process(LegalCaseReceivedEvent event) {
         Objects.requireNonNull(event, "event não pode ser nulo");
@@ -124,13 +142,16 @@ public class ProcessLegalCaseReceivedEventService {
             Classified classified = transactionRunner.inTransaction(() -> classify(event.legalCaseId()));
             List<DocumentTextContent> textContents =
                     extractDocumentTextService.extractPending(event.legalCaseId());
+            FactExtractionResult facts =
+                    factExtractionEnabled ? extractLegalFactsUseCase.extract(event.legalCaseId()) : null;
             // Todas as etapas são retomáveis: se esta marca falhar, a próxima entrega não refaz nada.
             processingEventStore.markProcessed(event.idempotencyKey());
             return new LegalCaseProcessingResult(
                     LegalCaseProcessingOutcome.PROCESSED,
                     classified.classification(),
                     classified.checklist(),
-                    textContents);
+                    textContents,
+                    facts);
         } catch (RuntimeException e) {
             // Sem marcar como processado, a próxima entrega tenta de novo — que é o que o Prompt 07
             // pede. Esgotadas as tentativas, a mensagem vai para a dead-letter.
@@ -150,7 +171,8 @@ public class ProcessLegalCaseReceivedEventService {
                 .findById(legalCaseId)
                 .orElseThrow(() -> new LegalCaseNotFoundException(legalCaseId));
 
-        if (legalCase.status() == LegalCaseStatus.EXTRACTING) {
+        if (legalCase.status() == LegalCaseStatus.EXTRACTING
+                || legalCase.status() == LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS) {
             return new Classified(null, checklistService.synchronize(legalCase));
         }
 

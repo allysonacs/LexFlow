@@ -49,6 +49,7 @@ A empresa recebe milhares de demandas jurídicas por dia (contratos, acordos, pr
 | Decisão humana | `Decision` | Decisão final do responsável: aprovar, reprovar ou devolver |
 | Texto extraído | `DocumentTextContent` | Texto de um documento, obtido da camada de texto ou por OCR, sem nenhum uso de LLM (Prompt 08) |
 | Classificação da demanda | `LegalCaseClassification` | Resultado da validação do tipo de demanda por palavras-chave (seção 5.1) |
+| Alerta da demanda | `LegalCaseAlert` | Situação que o pipeline não resolve sozinho (ex.: fatos inválidos após nova tentativa); segura a demanda até um humano tratar |
 | Log de auditoria | `AuditLog` | Registro imutável de qualquer ação relevante no sistema |
 | Evento de processamento | `ProcessingEvent` | Registro de evento assíncrono, usado para garantir idempotência |
 
@@ -80,7 +81,7 @@ Responsável por cada transição:
 |---|---|
 | criação em `RECEIVED` | ingestão (`POST /api/v1/legal-cases`, Prompt 05) |
 | `RECEIVED → CLASSIFYING → EXTRACTING` | consumidor da fila, na mesma transação da classificação e da geração do checklist (Prompts 07, 08 e 09) |
-| `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11). Até lá, a demanda permanece em `EXTRACTING` com o texto dos documentos já extraído |
+| `EXTRACTING → AI_ANALYSIS_IN_PROGRESS` | extração estruturada de fatos (Prompt 11), no mesmo consumidor da fila, quando nenhum alerta está em aberto. Com alerta, a demanda permanece em `EXTRACTING` |
 | `AI_ANALYSIS_IN_PROGRESS → PENDING_HUMAN_REVIEW` e seguintes | cadeia de IA e revisão humana (Prompts 13 e 15) |
 
 ---
@@ -169,8 +170,9 @@ document_checklist_items (
 -- único por (legal_case_id, checklist_rule_id); document_id preenchido se, e somente se, status = SATISFIED
 
 ai_extracted_facts (
-  id, legal_case_id, document_id, extracted_json, model_version, extracted_at
+  id, legal_case_id, document_id, extracted_json, model_version, prompt_version_id, extracted_at
 )
+-- único por document_id; prompt_version_id obrigatório (seção 10, item 5)
 
 knowledge_base_sources (
   id, title, source_type, effective_date
@@ -188,6 +190,13 @@ ai_analysis_responses (
 prompt_versions (
   id, prompt_key, version, template_text, active, created_at
 )
+-- no máximo uma versão ativa por prompt_key; uma versão nunca é editada, só substituída por outra
+
+legal_case_alerts (
+  id, legal_case_id, document_id, alert_type, message, created_at, resolved_at
+)
+-- alert_type: FACT_EXTRACTION_INVALID_OUTPUT | FACT_EXTRACTION_REFUSED | DOCUMENT_TOO_LONG_FOR_EXTRACTION
+-- alerta aberto (resolved_at nulo) impede a demanda de avançar automaticamente
 
 decisions (
   id, legal_case_id, decision_type, decided_by, decided_at, comments
@@ -215,6 +224,7 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V3__create_document_text_contents.sql` | tabela `document_text_contents`, com as restrições de consistência (Prompt 08) |
 | `V4__checklist_constraints_and_document_type.sql` | coluna `documents.document_type`, índices únicos de regras e de itens e restrições dos itens (Prompt 09) |
 | `V5__seed_checklist_rules.sql` | regras iniciais do checklist, com identificadores fixos (Prompt 09) |
+| `V6__fact_extraction.sql` | `ai_extracted_facts.prompt_version_id`, índices únicos, `legal_case_alerts` e o prompt `FACT_EXTRACTION` v1 (Prompt 11) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -291,7 +301,7 @@ Detalhamento (Prompt 09):
 
 Fluxo em cadeia (prompt chaining), nunca uma única chamada monolítica:
 
-1. **Extração estruturada** (`AiExtractedFact`) — o modelo extrai fatos do documento em JSON. Sem opinião jurídica nesta etapa.
+1. **Extração estruturada** (`AiExtractedFact`) — o modelo extrai fatos do documento em JSON. Sem opinião jurídica nesta etapa. Detalhes na seção 14 (Prompt 11): schema por tipo de demanda, prompt versionado, dupla validação, uma única nova tentativa e alerta quando ela também falha.
 2. **Recuperação normativa (RAG)** — para cada `question_key`, recuperar os `KnowledgeBaseChunk` mais relevantes via similaridade de embedding.
 3. **Resposta estruturada** — o modelo responde **apenas com base nos trechos recuperados**, no formato:
    ```json
@@ -371,7 +381,7 @@ O humano sempre vê: pergunta, resposta, confiança e o texto dos trechos citado
 
 ---
 
-## 14. Decisões de implementação registradas (Prompts 01 a 10)
+## 14. Decisões de implementação registradas (Prompts 01 a 11)
 
 Esta seção consolida as decisões tomadas durante a implementação que não constavam das seções anteriores. Qualquer mudança deve ser registrada aqui antes de ser implementada.
 
@@ -470,3 +480,19 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
   - Circuito aberto e bulkhead cheio também viram `LlmUnavailableException`.
 - **Log.** O prompt e a resposta nunca vão para o log. Em `INFO` saem modelo, tokens, latência e `request-id`; em `DEBUG`, só o tamanho e o hash do prompt.
 - **Chave de API.** Vem de `ANTHROPIC_API_KEY`. Sem ela, a aplicação sobe e só as chamadas falham.
+
+**Extração de fatos (Prompt 11)**
+- `ExtractLegalFactsUseCase` roda no consumidor da fila, logo depois da extração de texto, e só para documentos com texto (`EXTRACTED`). Pode ser desligado por `lexflow.pipeline.fact-extraction.enabled`; desligado, a demanda para em `EXTRACTING`.
+- **Schema.** `FactExtractionSchema` define uma parte comum e uma parte específica por tipo de demanda.
+  - Parte comum: `documentKind`, `parties`, `monetaryValues`, `relevantDates` e `keyClauses`.
+  - Parte específica (`specificFacts`): quatro campos por tipo de demanda.
+  - Todos os campos são obrigatórios e anuláveis, com `additionalProperties: false`. Mudar o schema exige nova versão do prompt.
+- **Prompt.** O texto vem de `prompt_versions` (`FACT_EXTRACTION`), com as seções `SISTEMA`, `USUARIO` e `REFORCO` e marcadores `{{...}}` preenchidos em uma única passada: o texto do documento nunca é reinterpretado como template.
+  - O documento vai entre `<documento>` e `</documento>`, e o modelo é instruído a ignorar instruções contidas nele.
+  - Cada fato grava `model_version` (o modelo que respondeu) e `prompt_version_id`.
+- **Validação.** O caso de uso valida o JSON contra o schema (porta `StructuredOutputValidator`) além da validação do cliente LLM. Em caso de falha, há uma nova tentativa com o bloco `REFORCO` (formato exigido e violações encontradas); se falhar de novo, nada é gravado e o documento recebe o alerta `FACT_EXTRACTION_INVALID_OUTPUT`.
+- **Outros alertas.** Recusa do modelo gera `FACT_EXTRACTION_REFUSED`. Texto acima de `max-document-characters` (padrão 400000) gera `DOCUMENT_TOO_LONG_FOR_EXTRACTION`, sem chamada: o texto nunca é truncado.
+- **Falhas de ambiente.** LLM indisponível, pedido recusado pelo provedor e prompt sem versão ativa sobem como exceção: a mensagem volta para a fila.
+- **Alertas e avanço.** Os alertas ficam em `legal_case_alerts`, separados da auditoria, porque participam do fluxo. Com algum alerta em aberto, a demanda fica em `EXTRACTING`; sem nenhum, avança para `AI_ANALYSIS_IN_PROGRESS`. Os alertas aparecem no `GET /api/v1/legal-cases/{id}`; resolvê-los é tarefa da revisão humana (Prompt 15).
+- **Retomada.** Documentos com fatos ou com alerta não voltam ao LLM. Uma demanda já em `AI_ANALYSIS_IN_PROGRESS` faz a etapa ser considerada concluída.
+- **Testes.** Nenhum teste automatizado chama o LLM real. O gabarito do contrato de teste fica em `fixtures/facts/contrato-texto-nativo.gabarito.json`.

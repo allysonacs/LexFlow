@@ -62,6 +62,23 @@ public class LegalCaseReceivedEventListener {
                 checklist.hasSufficientDocumentation(),
                 checklist.missingMandatoryDocumentTypes()));
 
+        result.factExtractionIfPerformed().ifPresent(facts -> {
+            if (facts.blockedByAlerts()) {
+                log.warn(
+                        "Extração de fatos com alerta: demanda={} fatos={} alertas abertos={} chamadas ao LLM={}; a demanda aguarda atenção humana",
+                        event.legalCaseId(),
+                        facts.facts().size(),
+                        facts.openAlerts().stream().map(alert -> alert.type().name()).toList(),
+                        facts.llmCalls());
+            } else {
+                log.info(
+                        "Extração de fatos: demanda={} fatos={} chamadas ao LLM={} avançou={}",
+                        event.legalCaseId(),
+                        facts.facts().size(),
+                        facts.llmCalls(),
+                        facts.advanced());
+            }
+        });
         // Só contagens: o texto dos documentos nunca vai para o log (seção 12).
         long failed = result.countByStatus(TextExtractionStatus.FAILED);
         String message = "Evento {} processado: demanda={} chave={} documentos: {} com texto, {} sem texto, {} ilegíveis";

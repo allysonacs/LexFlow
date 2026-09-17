@@ -36,16 +36,20 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 08 | Classificação determinística e extração de texto (Tika + Tesseract) | concluído |
 | 09 | Checklist documental determinístico, com API administrativa das regras | concluído |
 | 10 | Cliente LLM isolado e resiliente (Messages API da Anthropic) | concluído |
-| 11 | Extração estruturada de fatos via LLM | próximo |
-| 12–19 | RAG, cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
+| 11 | Extração estruturada de fatos via LLM, com prompt versionado e alertas | concluído |
+| 12 | Base normativa e RAG (pgvector) | próximo |
+| 13–19 | Cadeia de prompts, verificação, revisão humana, auditoria, resiliência, observabilidade e dataset de regressão | pendentes |
 
-Hoje o pipeline vai da ingestão até o checklist avaliado e o texto extraído, sem nenhuma chamada a LLM:
+Hoje o pipeline vai da ingestão até os fatos extraídos de cada documento. A única etapa que usa LLM é a extração de fatos:
 
 ```
-POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING
-  grava demanda,                          classificação      checklist documental gerado e avaliado;
-  documentos (com tipo)                   por palavras-chave texto de cada documento
-  e histórico                                                em document_text_contents
+POST /api/v1/legal-cases ──► RECEIVED ──(fila)──► CLASSIFYING ──► EXTRACTING ─────────────► AI_ANALYSIS_IN_PROGRESS
+  grava demanda,                          classificação      checklist gerado e avaliado;  fatos extraídos pelo LLM
+  documentos (com tipo)                   por palavras-chave texto de cada documento       (ai_extracted_facts)
+  e histórico                                                (Tika/Tesseract)
+                                                                       │
+                                                                       └─ saída inválida duas vezes, recusa ou documento
+                                                                          longo demais: alerta, e a demanda fica em EXTRACTING
 
 GET /api/v1/legal-cases/{id}/checklist ──► HAS_SUFFICIENT_DOCUMENTATION, por regra determinística
 ```
@@ -79,9 +83,10 @@ Java puro, sem uma única dependência. As entidades são `record` imutáveis: u
 |---|---|
 | `legalcase` | `LegalCase` (agregado raiz), `LegalCaseStatus`, `LegalCaseType`, `CasePriority`, `LegalCaseStatusTransition` e `LegalCaseStatusTransitionRules` |
 | `document` | `Document`, `Sha256Checksum`, `DocumentFormat`, `DocumentTypeCode`, `DocumentTextContent`, `TextExtractionMethod` e `TextExtractionStatus` |
+| `alert` | `LegalCaseAlert` e `LegalCaseAlertType`: situações que exigem atenção humana e seguram o pipeline |
 | `classification` | `LegalCaseKeywordClassifier`, `LegalCaseClassification`, `KeywordClassification` e `ClassificationOutcome` |
 | `checklist` | `ChecklistRule`, `DocumentChecklistItem`, `ChecklistItemStatus` e `DocumentChecklist` (gera, avalia e responde `HAS_SUFFICIENT_DOCUMENTATION`) |
-| `ai` | `AiExtractedFact`, `AiAnalysisResponse`, `ConfidenceScore`, `QuestionKey`, `VerificationStatus` |
+| `ai` | `AiExtractedFact` (com a versão do prompt usada), `AiAnalysisResponse`, `ConfidenceScore`, `QuestionKey`, `VerificationStatus`, `PromptVersion` |
 | `decision` | `Decision`, `DecisionType` |
 | `exception` | `DomainException` (base) e as exceções específicas de cada regra |
 
@@ -98,12 +103,13 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
 - O serviço é puro: não conhece banco, fila nem HTTP, e não persiste nada. Quem o chama grava a demanda pelo seu repositório e o registro pela porta **`LegalCaseStatusHistoryRepository`**, de preferência na mesma transação. A implementação dessa porta, em cima de JPA, é o `LegalCaseStatusHistoryRepositoryAdapter`.
 - O relógio e o gerador de identificadores são injetados, o que torna cada transição verificável com horário fixo nos testes.
 - **`ReceiveLegalCaseService`** é o caso de uso de ingestão: valida os arquivos, trata a idempotência, grava demanda, histórico e metadados em uma transação só e publica o evento de recebimento. **`FindLegalCaseService`** responde à consulta de status.
-- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, classifica a demanda, leva o status até `EXTRACTING`, gera o checklist documental e extrai o texto dos documentos (detalhes em [Classificação e extração de texto](#classificação-e-extração-de-texto)). Ele devolve um `LegalCaseProcessingResult` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
+- **`ProcessLegalCaseReceivedEventService`** é o caso de uso disparado pelo consumo da fila: reserva o evento, classifica a demanda, leva o status até `EXTRACTING`, gera o checklist documental, extrai o texto dos documentos e, por fim, os fatos (detalhes em [Classificação e extração de texto](#classificação-e-extração-de-texto)). Ele devolve um `LegalCaseProcessingResult` em vez de escrever no log — o módulo não depende nem de uma fachada de log, e quem conhece o contexto da mensagem é o consumidor.
 - **`ExtractDocumentTextService`** extrai o texto de cada documento de uma demanda e pula os que já foram lidos.
 - **`DocumentChecklistService`** gera e avalia o checklist documental e responde à consulta. **`ManageChecklistRulesService`** é o CRUD das regras. Detalhes em [Checklist documental](#checklist-documental-lexflow-application-e-lexflow-api).
 - `PageQuery` e `PageResult` dão paginação às listagens sem depender do Spring Data.
+- **`ExtractLegalFactsUseCase`** extrai os fatos de cada documento via LLM e leva a demanda a `AI_ANALYSIS_IN_PROGRESS` (ver [Extração de fatos](#extração-de-fatos-via-llm-lexflow-application)). `FactExtractionSchema` define o JSON Schema de cada tipo de demanda, e `PromptTemplate` monta o prompt a partir da versão registrada em `prompt_versions`.
 - **`LlmClientPort`** é a porta genérica para o LLM: recebe um `LlmRequest` e devolve um `LlmResponse` já validado. Ela não conhece nenhuma regra jurídica (ver [Cliente LLM](#cliente-llm-lexflow-infrastructure)).
-- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `ChecklistRuleRepository`, `DocumentChecklistItemRepository`, `LlmClientPort`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
+- As portas de saída ficam todas aqui: `LegalCaseRepository`, `DocumentRepository`, `DocumentStoragePort`, `DocumentTextExtractor`, `DocumentTextContentRepository`, `ChecklistRuleRepository`, `DocumentChecklistItemRepository`, `LlmClientPort`, `StructuredOutputValidator`, `AiExtractedFactRepository`, `PromptVersionRepository`, `LegalCaseAlertRepository`, `LegalCaseIngestionIdempotencyStore`, `ProcessingEventStore`, `LegalCaseReceivedEventPublisher` e `TransactionRunner`. A última existe para que o caso de uso possa dizer "faça isto em uma transação" sem que o Spring entre no módulo.
 
 ### Persistência (`lexflow-infrastructure`)
 
@@ -115,6 +121,7 @@ Casos de uso e portas. Também sem framework: depende apenas do domínio.
   | `V3` | 08 | tabela `document_text_contents` |
   | `V4` | 09 | coluna `documents.document_type`, índices únicos de regras e de itens, restrições de consistência dos itens |
   | `V5` | 09 | regras iniciais do checklist (seed) |
+  | `V6` | 11 | coluna `ai_extracted_facts.prompt_version_id`, um registro de fatos por documento, uma versão ativa por prompt, tabela `legal_case_alerts` e o prompt `FACT_EXTRACTION` v1 |
 - **Entidades JPA** em `persistence/entity`, separadas das entidades de domínio: o módulo `lexflow-domain` não tem nenhuma anotação de persistência. A conversão entre os dois mundos fica nos mappers de `persistence/mapper`.
 - **Repositórios Spring Data** em `persistence/repository`, um por tabela.
 - As colunas `jsonb` usam `@JdbcTypeCode(SqlTypes.JSON)` e o `embedding` usa o tipo `vector`, através do módulo `hibernate-vector`.
@@ -126,7 +133,7 @@ Nos testes, o Hibernate roda com `ddl-auto: validate`. Se uma entidade e uma mig
 | Endpoint | Descrição |
 |---|---|
 | `POST /api/v1/legal-cases` | Recebe uma demanda (multipart/form-data) com `caseType`, `requester`, `priority`, `externalReference`, `description` (opcional), um ou mais arquivos em `files` e, opcionalmente, `documentTypes` com o tipo de cada arquivo, na mesma ordem. Responde `201 Created` com o `id`, o `statusUrl` e o cabeçalho `Location`. |
-| `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados e o tipo de cada um. |
+| `GET /api/v1/legal-cases/{id}` | Status atual e metadados básicos da demanda, incluindo os arquivos anexados, o tipo de cada um e os alertas (`alerts`). |
 | `GET /api/v1/legal-cases/{id}/checklist` | Itens do checklist, documentos obrigatórios que faltam e `hasSufficientDocumentation`. |
 | `GET/POST /api/v1/admin/checklist-rules` | Lista (paginada, com filtro `caseType`) e cria regras de checklist. **Exige o papel `ADMIN`.** |
 | `GET/PUT/DELETE /api/v1/admin/checklist-rules/{id}` | Consulta, altera e exclui uma regra. **Exige o papel `ADMIN`.** |
@@ -285,9 +292,54 @@ Só `/api/v1/admin/**` exige autenticação: HTTP Basic, com o papel `ADMIN`, se
 
 > **Limitação conhecida.** As demais rotas continuam abertas. O controle de acesso por papel da seção 12 (`ANALYST`, `LEGAL_REVIEWER`, `ADMIN`) depende da escolha do provedor de identidade e fica contido na `SecurityConfiguration`.
 
+### Extração de fatos via LLM (`lexflow-application`)
+
+Primeiro uso real do LLM no pipeline (seção 10, item 1): o `ExtractLegalFactsUseCase` extrai **só fatos**, sem opinião jurídica, de cada documento que tem texto. Ele roda no mesmo consumidor da fila, logo depois da extração de texto.
+
+**O que é extraído.** O JSON segue o `FactExtractionSchema`. Todo campo é obrigatório e aceita `null`, e nenhum campo extra é permitido.
+
+| Parte | Campos |
+|---|---|
+| Comum a todo documento | `documentKind`, `parties` (nome, papel, CPF/CNPJ), `monetaryValues` (texto, número, moeda), `relevantDates` (texto, data ISO), `keyClauses` (título, trecho literal) |
+| `specificFacts` — `SUPPLIER_HIRING` | `supplierName`, `supplierTaxId`, `serviceScope`, `contractTermText` |
+| `specificFacts` — `CONTRACT_SIGNING` | `contractObject`, `contractTermText`, `terminationConditions`, `penaltyClause` |
+| `specificFacts` — `SETTLEMENT_PAYMENT` | `lawsuitNumber`, `settlementAmountText`, `installmentsText`, `paymentDeadlineText` |
+| `specificFacts` — `LAWSUIT_CLOSURE` | `lawsuitNumber`, `court`, `closureRequestText`, `pendingObligationsText` |
+| `specificFacts` — `PROPOSAL_ACCEPTANCE` | `proposingParty`, `proposalObject`, `proposedAmountText`, `validityText` |
+
+**O prompt.** O texto do prompt fica em `prompt_versions` (`FACT_EXTRACTION` v1, semeado pela `V6`), nunca no código.
+
+- Ele é dividido nas seções `SISTEMA`, `USUARIO` e `REFORCO`, com marcadores `{{...}}` que o código preenche.
+- As instruções pedem que o modelo registre apenas o que está escrito, não deduza nem complete, use `null` para o que não consta e não emita opinião jurídica.
+- O texto do documento vai entre `<documento>` e `</documento>`, e o modelo é avisado de que instruções dentro dele não se aplicam.
+- Cada fato gravado guarda o `model_version` e o `prompt_version_id`.
+- Mudar o texto é criar uma nova versão; o banco aceita só uma versão ativa por prompt.
+
+**Nada inválido é gravado.**
+
+1. A resposta passa pela validação do cliente LLM e, de novo, pela do caso de uso, que confere o JSON contra o schema do tipo antes de gravar (porta `StructuredOutputValidator`).
+2. Se falhar, há **uma** nova tentativa, com o prompt reforçando o formato e listando as violações.
+3. Se falhar de novo, nada é gravado para o documento: ele recebe um alerta `FACT_EXTRACTION_INVALID_OUTPUT`, e a demanda **fica em `EXTRACTING`**.
+
+**Como cada situação é tratada.**
+
+| Situação | Resultado |
+|---|---|
+| Fatos válidos em todos os documentos com texto | Fatos gravados; a demanda passa para `AI_ANALYSIS_IN_PROGRESS` |
+| Saída inválida duas vezes | Alerta `FACT_EXTRACTION_INVALID_OUTPUT`; os demais documentos seguem; a demanda não avança |
+| Recusa do modelo | Alerta `FACT_EXTRACTION_REFUSED`; idem |
+| Texto acima de `max-document-characters` (400 mil) | Alerta `DOCUMENT_TOO_LONG_FOR_EXTRACTION`, sem chamar o LLM — o texto **nunca** é truncado |
+| LLM indisponível ou pedido recusado pelo provedor | A exceção sobe e a mensagem volta para a fila (retry e, depois, dead-letter) |
+| Nenhuma versão ativa do prompt | Idem: é erro de configuração |
+
+- **Alertas.** Ficam em `legal_case_alerts` e aparecem no `GET /api/v1/legal-cases/{id}`. Enquanto houver algum em aberto, a demanda não avança sozinha; a resolução por um humano entra com a revisão humana (Prompt 15).
+- **Etapa retomável.** Documentos com fatos ou com alerta não voltam ao LLM, e há um registro de fatos por documento.
+- **Documentos sem texto.** Um documento ilegível ou sem texto não tem fatos e não segura a demanda: o problema dele já está registrado em `document_text_contents`.
+- **Desligar a etapa.** `LEXFLOW_FACT_EXTRACTION_ENABLED=false` desliga a extração de fatos, e a demanda para em `EXTRACTING` sem chamar o LLM. Isso é útil em ambientes sem `ANTHROPIC_API_KEY`: com a etapa ligada e sem chave, a mensagem vai para a dead-letter depois das tentativas.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
-`AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. Ainda não há caso de uso que o chame; o primeiro será a extração de fatos (Prompt 11).
+`AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
 
 ```java
 LlmResponse response = llmClient.complete(LlmRequest.structured(
@@ -390,6 +442,13 @@ O cliente LLM é testado em `AnthropicMessagesClientIT`, contra um provedor simu
 
 O `LexFlowApplicationTest` confere que a configuração do `application.yml` foi carregada.
 
+Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste automatizado chama o provedor real.
+
+- **Resposta padrão.** O dublê devolve o gabarito (`fixtures/facts/contrato-texto-nativo.gabarito.json`) para o contrato de teste e uma extração vazia para os demais documentos.
+- **Respostas roteirizadas.** Cada teste pode enfileirar respostas próprias.
+- **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
+- **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
+
 Os testes de extração (`TikaDocumentTextExtractorTest`, `LegalCaseClassificationExtractionIT` e `LegalCaseChecklistIT`) **exigem o Tesseract instalado**. Sem ele, os testes falham em vez de serem pulados: um OCR quebrado precisa aparecer no build. As fixtures ficam em `lexflow-infrastructure/src/testFixtures/resources/fixtures/documents`, todas com conteúdo fictício: um PDF com texto, um PDF digitalizado, um PNG, um JPEG e um DOCX. Elas são descritas em `DocumentFixtures` e compartilhadas com o módulo da API.
 
 O adapter de storage é testado contra um MinIO real, e não contra um dublê do S3: erros de *path-style access*, de credencial e de bucket inexistente só aparecem contra um serviço de verdade.
@@ -453,6 +512,8 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_LLM_CIRCUIT_OPEN_WAIT` | Tempo com o circuito aberto (padrão `30s`) |
 | `LEXFLOW_LLM_MAX_CONCURRENT_CALLS` | Chamadas simultâneas ao LLM por réplica (padrão `16`) |
 | `LEXFLOW_LLM_REFUSAL_FALLBACK` | `default` para o provedor tentar outro modelo quando o pedido é recusado; vazio desliga |
+| `LEXFLOW_FACT_EXTRACTION_ENABLED` | Liga a extração de fatos via LLM (padrão `true`); desligada, a demanda para em `EXTRACTING` |
+| `LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS` | Tamanho máximo do texto enviado por documento (padrão `400000`); acima disso, alerta |
 | `LEXFLOW_OCR_LANGUAGE` | Idiomas do Tesseract, no formato dele (padrão `por`; ex.: `por+eng`) |
 | `LEXFLOW_TESSERACT_PATH` | Diretório do executável `tesseract`; vazio procura no `PATH` |
 | `LEXFLOW_OCR_TIMEOUT` | Tempo máximo de OCR por imagem ou página (padrão `2m`) |

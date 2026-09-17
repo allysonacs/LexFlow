@@ -11,7 +11,16 @@ import com.lexflow.application.exception.UnreadableDocumentException;
 import com.lexflow.application.legalcase.support.ChecklistTestDoubles;
 import com.lexflow.application.legalcase.support.ChecklistTestDoubles.InMemoryChecklistRuleRepository;
 import com.lexflow.application.legalcase.support.ChecklistTestDoubles.InMemoryDocumentChecklistItemRepository;
+import com.lexflow.application.fact.ExtractLegalFactsUseCase;
 import com.lexflow.application.legalcase.support.ExtractionTestDoubles.InMemoryDocumentTextContentRepository;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.FakeStructuredOutputValidator;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.InMemoryAiExtractedFactRepository;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.InMemoryLegalCaseAlertRepository;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.InMemoryPromptVersionRepository;
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.ScriptedLlmClient;
+import com.lexflow.application.llm.LlmUnavailableException;
+import com.lexflow.domain.alert.LegalCaseAlertType;
 import com.lexflow.application.legalcase.support.ExtractionTestDoubles.ScriptedTextExtractor;
 import com.lexflow.application.legalcase.support.InMemoryProcessingEventStore;
 import com.lexflow.application.legalcase.support.InMemoryProcessingEventStore.State;
@@ -64,7 +73,13 @@ class ProcessLegalCaseReceivedEventServiceTest {
     private InMemoryDocumentChecklistItemRepository checklistItemRepository;
     private InMemoryProcessingEventStore processingEventStore;
     private DirectTransactionRunner transactionRunner;
+    private InMemoryAiExtractedFactRepository factRepository;
+    private InMemoryLegalCaseAlertRepository alertRepository;
+    private ScriptedLlmClient llm;
+    private InMemoryChecklistRuleRepository ruleRepository;
     private ProcessLegalCaseReceivedEventService service;
+
+    private static final String VALID_FACTS = "{\"parties\": []}";
 
     @BeforeEach
     void setUp() {
@@ -79,18 +94,46 @@ class ProcessLegalCaseReceivedEventServiceTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         SequentialIdGenerator ids = new SequentialIdGenerator();
         checklistItemRepository = new InMemoryDocumentChecklistItemRepository();
-        InMemoryChecklistRuleRepository ruleRepository = new InMemoryChecklistRuleRepository();
+        ruleRepository = new InMemoryChecklistRuleRepository();
         ChecklistTestDoubles.seedRules().forEach(ruleRepository::save);
-        service = new ProcessLegalCaseReceivedEventService(
+        factRepository = new InMemoryAiExtractedFactRepository();
+        alertRepository = new InMemoryLegalCaseAlertRepository();
+        llm = new ScriptedLlmClient().byDefault(request -> ScriptedLlmClient.response(VALID_FACTS));
+        service = newService(true);
+    }
+
+    private ProcessLegalCaseReceivedEventService newService(boolean factExtractionEnabled) {
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        SequentialIdGenerator ids = new SequentialIdGenerator();
+        LegalCaseStatusTransitionService transitions =
+                new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids);
+        ExtractLegalFactsUseCase factExtraction = new ExtractLegalFactsUseCase(
+                legalCaseRepository,
+                documentRepository,
+                textContentRepository,
+                factRepository,
+                alertRepository,
+                new InMemoryPromptVersionRepository().with(FactExtractionTestDoubles.PROMPT_V1),
+                llm,
+                new FakeStructuredOutputValidator(),
+                transitions,
+                statusHistoryRepository,
+                transactionRunner,
+                clock,
+                ids,
+                100_000);
+        return new ProcessLegalCaseReceivedEventService(
                 legalCaseRepository,
                 documentRepository,
                 statusHistoryRepository,
-                new LegalCaseStatusTransitionService(new LegalCaseStatusTransitionRules(), clock, ids),
+                transitions,
                 new LegalCaseKeywordClassifier(),
                 new DocumentChecklistService(
                         legalCaseRepository, documentRepository, ruleRepository, checklistItemRepository, clock, ids),
                 new ExtractDocumentTextService(
                         documentRepository, textContentRepository, storage, extractor, clock, ids),
+                factExtraction,
+                factExtractionEnabled,
                 processingEventStore,
                 transactionRunner);
     }
@@ -139,7 +182,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
     }
 
     @Test
-    @DisplayName("a demanda é classificada, vai até EXTRACTING e tem o texto dos documentos gravado")
+    @DisplayName("a demanda é classificada, tem texto e fatos extraídos e chega a AI_ANALYSIS_IN_PROGRESS")
     void shouldClassifyAndExtractText() {
         LegalCase legalCase = givenLegalCase(LegalCaseType.CONTRACT_SIGNING, "Assinatura do contrato", LegalCaseStatus.RECEIVED);
         givenDocument(legalCase, "minuta_contrato.pdf", "Cláusula primeira", "CONTRACT_DRAFT");
@@ -155,7 +198,12 @@ class ProcessLegalCaseReceivedEventServiceTest {
             assertThat(classification.resolvedType()).isEqualTo(LegalCaseType.CONTRACT_SIGNING);
         });
         assertThat(result.countByStatus(TextExtractionStatus.EXTRACTED)).isEqualTo(2);
-        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+        assertThat(result.factExtractionIfPerformed()).get().satisfies(facts -> {
+            assertThat(facts.facts()).hasSize(2);
+            assertThat(facts.advanced()).isTrue();
+        });
+        assertThat(llm.requests()).hasSize(2);
         // Checklist gerado na mesma etapa: a minuta satisfaz seu item, o parecer financeiro falta.
         assertThat(result.checklistIfEvaluated()).get().satisfies(checklist -> {
             assertThat(checklist.items()).hasSize(3);
@@ -167,7 +215,8 @@ class ProcessLegalCaseReceivedEventServiceTest {
                 .hasSize(2);
         assertThat(textContentRepository.findByLegalCaseId(legalCase.id())).hasSize(2);
 
-        assertThat(statusHistoryRepository.all()).hasSize(2);
+        assertThat(statusHistoryRepository.all()).hasSize(3);
+        assertThat(statusHistoryRepository.all().get(2).newStatus()).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
         assertThat(statusHistoryRepository.all().get(0)).satisfies(entry -> {
             assertThat(entry.previousStatus()).isEqualTo(LegalCaseStatus.RECEIVED);
             assertThat(entry.newStatus()).isEqualTo(LegalCaseStatus.CLASSIFYING);
@@ -184,18 +233,21 @@ class ProcessLegalCaseReceivedEventServiceTest {
                     .contains("assinatura");
         });
         assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.PROCESSED);
-        // As duas transições em uma unidade de trabalho só; a extração fica fora dela.
-        assertThat(transactionRunner.transactionCount()).isEqualTo(1);
+        // Classificação em uma transação; a extração fica fora; o avanço final em outra.
+        assertThat(transactionRunner.transactionCount()).isEqualTo(2);
     }
 
     @Test
-    @DisplayName("nunca avança para AI_ANALYSIS_IN_PROGRESS: isso é da extração de fatos")
-    void shouldStopAtExtracting() {
+    @DisplayName("com a extração de fatos desligada, a demanda termina em EXTRACTING, sem chamar o LLM")
+    void shouldStopAtExtractingWhenFactExtractionIsDisabled() {
+        service = newService(false);
         LegalCase legalCase = givenLegalCase(LegalCaseStatus.RECEIVED);
         givenDocument(legalCase, "contrato.pdf", "texto");
 
-        service.process(eventFor(legalCase.id()));
+        LegalCaseProcessingResult result = service.process(eventFor(legalCase.id()));
 
+        assertThat(result.factExtractionIfPerformed()).isEmpty();
+        assertThat(llm.requests()).isEmpty();
         assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
         assertThat(statusHistoryRepository.all())
                 .extracting(LegalCaseStatusHistoryEntry::newStatus)
@@ -231,7 +283,9 @@ class ProcessLegalCaseReceivedEventServiceTest {
 
         assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.PROCESSED);
         assertThat(result.countByStatus(TextExtractionStatus.FAILED)).isEqualTo(1);
-        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        // Sem texto, não há o que enviar ao LLM; sem alerta, a demanda segue.
+        assertThat(llm.requests()).isEmpty();
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
     }
 
     @Test
@@ -271,7 +325,7 @@ class ProcessLegalCaseReceivedEventServiceTest {
         assertThat(result.checklistIfEvaluated()).get().satisfies(checklist -> assertThat(checklist.items()).hasSize(3));
         assertThat(checklistItemRepository.all()).hasSize(3);
         assertThat(result.countByStatus(TextExtractionStatus.EXTRACTED)).isEqualTo(1);
-        assertThat(statusHistoryRepository.all()).hasSize(2);
+        assertThat(statusHistoryRepository.all()).hasSize(3);
         assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.PROCESSED);
     }
 
@@ -284,8 +338,8 @@ class ProcessLegalCaseReceivedEventServiceTest {
         LegalCaseProcessingResult result = service.process(eventFor(legalCase.id()));
 
         assertThat(result.classificationIfPerformed()).isPresent();
-        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
-        assertThat(statusHistoryRepository.all()).singleElement().satisfies(entry -> {
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+        assertThat(statusHistoryRepository.all()).hasSize(2).first().satisfies(entry -> {
             assertThat(entry.previousStatus()).isEqualTo(LegalCaseStatus.CLASSIFYING);
             assertThat(entry.newStatus()).isEqualTo(LegalCaseStatus.EXTRACTING);
         });
@@ -306,9 +360,11 @@ class ProcessLegalCaseReceivedEventServiceTest {
         assertThat(result.classification()).isNull();
         assertThat(result.checklistIfEvaluated()).isEmpty();
         assertThat(result.textContents()).isEmpty();
-        assertThat(statusHistoryRepository.all()).hasSize(2);
+        assertThat(result.factExtractionIfPerformed()).isEmpty();
+        assertThat(statusHistoryRepository.all()).hasSize(3);
         assertThat(extractor.calls()).hasSize(1);
-        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        assertThat(llm.requests()).hasSize(1);
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
     }
 
     @Test
@@ -367,5 +423,65 @@ class ProcessLegalCaseReceivedEventServiceTest {
     void shouldRejectSkippedResultWithProcessedOutcome() {
         assertThatExceptionOfType(IllegalArgumentException.class)
                 .isThrownBy(() -> LegalCaseProcessingResult.skipped(LegalCaseProcessingOutcome.PROCESSED));
+    }
+
+    // ---- Extração de fatos (Prompt 11) ----
+
+    @Test
+    @DisplayName("fatos inválidos duas vezes: evento processado, demanda com alerta e parada em EXTRACTING")
+    void shouldKeepCaseInExtractingWhenFactsNeedAttention() {
+        LegalCase legalCase = givenLegalCase(LegalCaseStatus.RECEIVED);
+        givenDocument(legalCase, "contrato.pdf", "texto");
+        llm.byDefault(request -> ScriptedLlmClient.response("{\"INVALIDO\": true}"));
+        LegalCaseReceivedEvent event = eventFor(legalCase.id());
+
+        LegalCaseProcessingResult result = service.process(event);
+
+        assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.PROCESSED);
+        assertThat(result.factExtraction().blockedByAlerts()).isTrue();
+        assertThat(factRepository.all()).isEmpty();
+        assertThat(alertRepository.all()).singleElement()
+                .satisfies(alert -> assertThat(alert.type()).isEqualTo(LegalCaseAlertType.FACT_EXTRACTION_INVALID_OUTPUT));
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        // Não é falha técnica: a mensagem não volta para a fila, a demanda espera um humano.
+        assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.PROCESSED);
+    }
+
+    @Test
+    @DisplayName("LLM indisponível faz o evento falhar; a nova entrega conclui sem refazer o que já foi feito")
+    void shouldRetryWhenLlmIsUnavailable() {
+        LegalCase legalCase = givenLegalCase(LegalCaseStatus.RECEIVED);
+        givenDocument(legalCase, "contrato.pdf", "texto");
+        llm.then(request -> {
+            throw new LlmUnavailableException("sobrecarregado", 529);
+        });
+        LegalCaseReceivedEvent event = eventFor(legalCase.id());
+
+        assertThatExceptionOfType(LlmUnavailableException.class).isThrownBy(() -> service.process(event));
+        assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.FAILED);
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.EXTRACTING);
+
+        LegalCaseProcessingResult result = service.process(event);
+
+        assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.PROCESSED);
+        assertThat(statusOf(legalCase)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+        assertThat(extractor.calls()).hasSize(1);
+        assertThat(statusHistoryRepository.all()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("demanda que já chegou a AI_ANALYSIS_IN_PROGRESS é tratada como concluída")
+    void shouldCompleteWhenCaseAlreadyAdvanced() {
+        LegalCase legalCase = givenLegalCase(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+        LegalCaseReceivedEvent event = eventFor(legalCase.id());
+
+        LegalCaseProcessingResult result = service.process(event);
+
+        assertThat(result.outcome()).isEqualTo(LegalCaseProcessingOutcome.PROCESSED);
+        assertThat(result.classificationIfPerformed()).isEmpty();
+        assertThat(result.factExtraction().advanced()).isFalse();
+        assertThat(llm.requests()).isEmpty();
+        assertThat(statusHistoryRepository.all()).isEmpty();
+        assertThat(processingEventStore.stateOf(event.idempotencyKey())).isEqualTo(State.PROCESSED);
     }
 }

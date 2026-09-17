@@ -9,7 +9,7 @@ package com.lexflow.application.legalcase;
  */
 public enum LegalCaseProcessingOutcome {
 
-    /** A demanda foi classificada, teve o texto extraído e o evento foi marcado como processado. */
+    /** A demanda percorreu as etapas do processamento e o evento foi marcado como processado. */
     PROCESSED,
 
     /** O evento já havia sido processado antes; nada foi feito, e isso não é erro. */

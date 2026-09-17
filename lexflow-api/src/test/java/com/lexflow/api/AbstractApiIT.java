@@ -1,5 +1,6 @@
 package com.lexflow.api;
 
+import com.lexflow.api.support.StubLlmClientConfiguration;
 import com.lexflow.infrastructure.testsupport.MinioTestcontainersConfiguration;
 import com.lexflow.infrastructure.testsupport.PostgresTestcontainersConfiguration;
 import com.lexflow.infrastructure.testsupport.RabbitMqTestcontainersConfiguration;
@@ -16,12 +17,15 @@ import org.springframework.context.annotation.Import;
  * <p>O consumidor da fila sobe parado (ver {@link RabbitMqTestcontainersConfiguration}); quem quiser
  * exercitar o processamento assíncrono o inicia explicitamente.
  *
+ * <p>O LLM é sempre o {@link com.lexflow.api.support.StubLlmClient}: nenhum teste chama o provedor real.
+ *
  * <p>Requer Docker em execução.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({
     PostgresTestcontainersConfiguration.class,
     MinioTestcontainersConfiguration.class,
-    RabbitMqTestcontainersConfiguration.class
+    RabbitMqTestcontainersConfiguration.class,
+    StubLlmClientConfiguration.class
 })
 public abstract class AbstractApiIT {}

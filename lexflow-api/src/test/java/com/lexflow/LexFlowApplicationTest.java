@@ -3,7 +3,6 @@ package com.lexflow;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.lexflow.api.AbstractApiIT;
-import com.lexflow.application.llm.LlmClientPort;
 import com.lexflow.infrastructure.llm.AnthropicMessagesClient;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.RetryRegistry;
@@ -44,7 +43,7 @@ class LexFlowApplicationTest extends AbstractApiIT {
     }
 
     @Autowired
-    private LlmClientPort llmClient;
+    private AnthropicMessagesClient llmClient;
 
     @Autowired
     private RetryRegistry retryRegistry;
@@ -60,7 +59,8 @@ class LexFlowApplicationTest extends AbstractApiIT {
     void llmClientShouldBeConfiguredFromApplicationYml() {
         String instance = AnthropicMessagesClient.RESILIENCE_INSTANCE;
 
-        assertThat(llmClient).isInstanceOf(AnthropicMessagesClient.class);
+        // Nos testes, quem pede a porta recebe o dublê; o cliente real continua no contexto.
+        assertThat(llmClient).isNotNull();
         assertThat(retryRegistry.retry(instance).getRetryConfig().getMaxAttempts()).isEqualTo(3);
         assertThat(circuitBreakerRegistry.circuitBreaker(instance).getCircuitBreakerConfig().getSlidingWindowSize())
                 .isEqualTo(20);

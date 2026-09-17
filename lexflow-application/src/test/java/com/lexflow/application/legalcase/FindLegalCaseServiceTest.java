@@ -3,8 +3,11 @@ package com.lexflow.application.legalcase;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.lexflow.application.legalcase.support.FactExtractionTestDoubles.InMemoryLegalCaseAlertRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryDocumentRepository;
 import com.lexflow.application.legalcase.support.IngestionTestDoubles.InMemoryLegalCaseRepository;
+import com.lexflow.domain.alert.LegalCaseAlert;
+import com.lexflow.domain.alert.LegalCaseAlertType;
 import com.lexflow.domain.document.Document;
 import com.lexflow.domain.document.Sha256Checksum;
 import com.lexflow.domain.exception.LegalCaseNotFoundException;
@@ -25,13 +28,15 @@ class FindLegalCaseServiceTest {
 
     private InMemoryLegalCaseRepository legalCaseRepository;
     private InMemoryDocumentRepository documentRepository;
+    private InMemoryLegalCaseAlertRepository alertRepository;
     private FindLegalCaseService service;
 
     @BeforeEach
     void setUp() {
         legalCaseRepository = new InMemoryLegalCaseRepository();
         documentRepository = new InMemoryDocumentRepository();
-        service = new FindLegalCaseService(legalCaseRepository, documentRepository);
+        alertRepository = new InMemoryLegalCaseAlertRepository();
+        service = new FindLegalCaseService(legalCaseRepository, documentRepository, alertRepository);
     }
 
     @Test
@@ -49,10 +54,15 @@ class FindLegalCaseServiceTest {
                 Sha256Checksum.ofContent("a".getBytes(StandardCharsets.UTF_8)),
                 NOW)));
 
+        alertRepository.save(LegalCaseAlert.open(
+                UUID.randomUUID(), legalCaseId, null, LegalCaseAlertType.FACT_EXTRACTION_REFUSED, "recusa", NOW));
+
         LegalCaseWithDocuments found = service.findById(legalCaseId);
 
         assertThat(found.legalCase().id()).isEqualTo(legalCaseId);
         assertThat(found.documents()).extracting(Document::fileName).containsExactly("sentenca.pdf");
+        assertThat(found.alerts()).extracting(LegalCaseAlert::type)
+                .containsExactly(LegalCaseAlertType.FACT_EXTRACTION_REFUSED);
     }
 
     @Test

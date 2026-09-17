@@ -154,7 +154,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
     }
 
     @Test
-    @DisplayName("a ingestão publica o evento e o consumo leva a demanda até EXTRACTING")
+    @DisplayName("a ingestão publica o evento e o consumo leva a demanda até AI_ANALYSIS_IN_PROGRESS")
     void shouldProcessEventAndAdvanceStatus() {
         UUID legalCaseId = ingestLegalCase();
         assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.RECEIVED);
@@ -162,15 +162,19 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         startListener();
 
         await().atMost(TIMEOUT).untilAsserted(() -> {
-            assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING);
-            // Cada transição deixou rastro: registro inicial, CLASSIFYING e EXTRACTING. As duas
-            // últimas nascem na mesma transação, então a ordem é conferida pelo status anterior.
+            assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
+            // Cada transição deixou rastro: registro inicial, CLASSIFYING, EXTRACTING e
+            // AI_ANALYSIS_IN_PROGRESS. Algumas nascem na mesma transação, então a ordem é conferida
+            // pelo status anterior.
             assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                    .hasSize(3)
+                    .hasSize(4)
                     .filteredOn(entry -> entry.getPreviousStatus() != null)
                     .allSatisfy(entry -> assertThat(entry.getChangedBy()).isEqualTo("SYSTEM"))
                     .extracting(entry -> entry.getPreviousStatus() + "->" + entry.getNewStatus())
-                    .containsExactlyInAnyOrder("RECEIVED->CLASSIFYING", "CLASSIFYING->EXTRACTING");
+                    .containsExactlyInAnyOrder(
+                            "RECEIVED->CLASSIFYING",
+                            "CLASSIFYING->EXTRACTING",
+                            "EXTRACTING->AI_ANALYSIS_IN_PROGRESS");
             assertThat(processingEventRepository.findAll())
                     .filteredOn(event -> legalCaseId.equals(event.getAggregateId()))
                     .singleElement()
@@ -191,15 +195,20 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         eventPublisher.publish(event);
         startListener();
 
-        await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE))
-                        .isZero());
+        // A fila esvazia assim que as duas entregas são recebidas — a descartada é confirmada na
+        // hora —, então a espera é pelo fim do processamento, e não pela fila.
+        await().atMost(TIMEOUT).untilAsserted(() -> {
+            assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE)).isZero();
+            assertThat(processingEventRepository.findByIdempotencyKey(event.idempotencyKey()))
+                    .get()
+                    .satisfies(processed -> assertThat(processed.getStatus()).isEqualTo(ProcessingEventStatus.PROCESSED));
+        });
 
         // A segunda entrega foi descartada pela chave de idempotência: um único processamento, sem
         // transições nem extrações repetidas.
-        assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING);
+        assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS);
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                .hasSize(3);
+                .hasSize(4);
         assertThat(textContentRepository.findByLegalCaseId(legalCaseId)).hasSize(1);
         assertThat(processingEventRepository.findByIdempotencyKey(event.idempotencyKey()))
                 .get()
@@ -235,7 +244,8 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
 
         // Critério de aceite: a falha não travou a fila — a demanda saudável seguiu sendo processada.
         await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(statusOf(healthyCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING));
+                .untilAsserted(() -> assertThat(statusOf(healthyCaseId))
+                        .isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS));
         assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_DLQ)).isEqualTo(1);
     }
 
@@ -248,7 +258,8 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
         eventPublisher.publish(event);
         startListener();
         await().atMost(TIMEOUT)
-                .untilAsserted(() -> assertThat(statusOf(legalCaseId)).isEqualTo(LegalCaseStatus.EXTRACTING));
+                .untilAsserted(() -> assertThat(statusOf(legalCaseId))
+                        .isEqualTo(LegalCaseStatus.AI_ANALYSIS_IN_PROGRESS));
 
         // Reentrega muito depois, com o evento já concluído.
         eventPublisher.publish(event);
@@ -257,7 +268,7 @@ class LegalCaseProcessingQueueIT extends AbstractApiIT {
                 .untilAsserted(() -> assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE))
                         .isZero());
         assertThat(statusHistoryRepository.findByLegalCaseIdOrderByChangedAtAsc(legalCaseId))
-                .hasSize(3);
+                .hasSize(4);
         assertThat(messageCountOf(RabbitMqConfiguration.LEGAL_CASE_RECEIVED_DLQ)).isZero();
     }
 }

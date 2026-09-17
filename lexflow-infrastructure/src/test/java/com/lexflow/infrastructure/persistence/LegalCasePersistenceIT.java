@@ -53,6 +53,9 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
 
     private static final Instant NOW = Instant.parse("2026-02-01T10:15:30Z");
 
+    /** Versão de prompt semeada pela migration V6. */
+    private static final UUID FACT_EXTRACTION_PROMPT_V1 = UUID.fromString("7c1d0e5a-0011-4f00-8000-000000000001");
+
     @Autowired
     private LegalCaseJpaRepository legalCaseRepository;
 
@@ -191,7 +194,8 @@ class LegalCasePersistenceIT extends AbstractPersistenceIT {
         String extractedJson =
                 "{\"parties\":[\"ACME LTDA\",\"Fornecedor XPTO\"],\"amount\":150000.5,\"signedAt\":null}";
         AiExtractedFact fact = new AiExtractedFact(
-                UUID.randomUUID(), legalCase.id(), document.id(), extractedJson, "claude-opus-5", NOW);
+                UUID.randomUUID(), legalCase.id(), document.id(), extractedJson, "claude-opus-5",
+                FACT_EXTRACTION_PROMPT_V1, NOW);
         List<UUID> citedChunks = List.of(UUID.randomUUID(), UUID.randomUUID());
         AiAnalysisResponse response = AiAnalysisResponse.of(
                 UUID.randomUUID(),

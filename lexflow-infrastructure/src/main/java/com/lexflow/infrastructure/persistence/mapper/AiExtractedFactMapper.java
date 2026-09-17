@@ -17,6 +17,7 @@ public final class AiExtractedFactMapper {
                 fact.documentId(),
                 fact.extractedJson(),
                 fact.modelVersion(),
+                fact.promptVersionId(),
                 fact.extractedAt());
     }
 
@@ -27,6 +28,7 @@ public final class AiExtractedFactMapper {
                 entity.getDocumentId(),
                 entity.getExtractedJson(),
                 entity.getModelVersion(),
+                entity.getPromptVersionId(),
                 entity.getExtractedAt());
     }
 }

@@ -83,6 +83,13 @@ lexflow:
     # Quando o modelo recusa um pedido por política, o provedor tenta outro modelo na mesma chamada.
     # O modelo que respondeu fica registrado na resposta. Vazio desliga.
     refusal-fallback: ${LEXFLOW_LLM_REFUSAL_FALLBACK:default}
+  # Etapas do pipeline assíncrono.
+  pipeline:
+    fact-extraction:
+      # Extração de fatos via LLM (Prompt 11). Desligada, a demanda para em EXTRACTING sem chamar o LLM.
+      enabled: ${LEXFLOW_FACT_EXTRACTION_ENABLED:true}
+      # Documentos maiores recebem alerta para tratamento humano; nunca são truncados.
+      max-document-characters: ${LEXFLOW_FACT_EXTRACTION_MAX_CHARACTERS:400000}
   # Extração de texto dos documentos (Prompt 08). O OCR usa o Tesseract instalado na máquina,
   # com os pacotes de idioma informados.
   extraction:

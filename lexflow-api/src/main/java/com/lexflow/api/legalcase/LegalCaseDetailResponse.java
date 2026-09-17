@@ -1,6 +1,8 @@
 package com.lexflow.api.legalcase;
 
 import com.lexflow.application.legalcase.LegalCaseWithDocuments;
+import com.lexflow.domain.alert.LegalCaseAlert;
+import com.lexflow.domain.alert.LegalCaseAlertType;
 import com.lexflow.domain.legalcase.CasePriority;
 import com.lexflow.domain.legalcase.LegalCaseStatus;
 import com.lexflow.domain.legalcase.LegalCaseType;
@@ -19,7 +21,20 @@ public record LegalCaseDetailResponse(
         CasePriority priority,
         Instant createdAt,
         Instant updatedAt,
-        List<DocumentSummaryResponse> documents) {
+        List<DocumentSummaryResponse> documents,
+        List<AlertResponse> alerts) {
+
+    /**
+     * Alerta da demanda: algo que o pipeline não resolveu sozinho e que a segura até um humano tratar.
+     */
+    public record AlertResponse(
+            UUID id, LegalCaseAlertType type, UUID documentId, String message, Instant createdAt, Instant resolvedAt) {
+
+        static AlertResponse from(LegalCaseAlert alert) {
+            return new AlertResponse(
+                    alert.id(), alert.type(), alert.documentId(), alert.message(), alert.createdAt(), alert.resolvedAt());
+        }
+    }
 
     public static LegalCaseDetailResponse from(LegalCaseWithDocuments legalCase) {
         return new LegalCaseDetailResponse(
@@ -32,6 +47,7 @@ public record LegalCaseDetailResponse(
                 legalCase.legalCase().priority(),
                 legalCase.legalCase().createdAt(),
                 legalCase.legalCase().updatedAt(),
-                legalCase.documents().stream().map(DocumentSummaryResponse::from).toList());
+                legalCase.documents().stream().map(DocumentSummaryResponse::from).toList(),
+                legalCase.alerts().stream().map(AlertResponse::from).toList());
     }
 }

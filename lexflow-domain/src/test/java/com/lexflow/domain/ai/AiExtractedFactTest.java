@@ -20,6 +20,7 @@ class AiExtractedFactTest {
                 UUID.randomUUID(),
                 "{\"parties\":[\"ACME\"]}",
                 "claude-opus-5",
+                UUID.randomUUID(),
                 EXTRACTED_AT);
 
         assertThat(fact.extractedJson()).contains("ACME");
@@ -31,14 +32,18 @@ class AiExtractedFactTest {
         UUID id = UUID.randomUUID();
 
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new AiExtractedFact(id, id, id, " ", "claude-opus-5", EXTRACTED_AT))
+                .isThrownBy(() -> new AiExtractedFact(id, id, id, " ", "claude-opus-5", id, EXTRACTED_AT))
                 .withMessageContaining("extractedJson");
 
         assertThatIllegalArgumentException()
-                .isThrownBy(() -> new AiExtractedFact(id, id, id, "{}", null, EXTRACTED_AT))
+                .isThrownBy(() -> new AiExtractedFact(id, id, id, "{}", null, id, EXTRACTED_AT))
                 .withMessageContaining("modelVersion");
 
         assertThatNullPointerException()
-                .isThrownBy(() -> new AiExtractedFact(id, id, null, "{}", "claude-opus-5", EXTRACTED_AT));
+                .isThrownBy(() -> new AiExtractedFact(id, id, null, "{}", "claude-opus-5", id, EXTRACTED_AT));
+
+        assertThatNullPointerException()
+                .isThrownBy(() -> new AiExtractedFact(id, id, id, "{}", "claude-opus-5", null, EXTRACTED_AT))
+                .withMessageContaining("promptVersionId");
     }
 }
