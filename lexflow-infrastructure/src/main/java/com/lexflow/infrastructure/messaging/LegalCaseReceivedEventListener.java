@@ -5,9 +5,12 @@ import com.lexflow.application.legalcase.LegalCaseReceivedEvent;
 import com.lexflow.application.legalcase.ProcessLegalCaseReceivedEventService;
 import com.lexflow.domain.classification.LegalCaseClassification;
 import com.lexflow.domain.document.TextExtractionStatus;
+import com.lexflow.infrastructure.observability.LegalCaseCorrelation;
+import io.micrometer.tracing.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
@@ -23,6 +26,11 @@ import org.springframework.stereotype.Component;
  * as tentativas, faz o broker mandar a mensagem para a dead-letter. Capturar a exceção aqui daria um
  * "processado com sucesso" falso e perderia a mensagem em silêncio.
  *
+ * <p><strong>Correlação.</strong> Todo o processamento roda dentro do escopo de
+ * {@link LegalCaseCorrelation}: os logs desta etapa saem com o {@code legalCaseId}, e o identificador
+ * viaja no trace. Sem isso, o que acontece depois da fila apareceria desligado da requisição que o
+ * originou — e a pergunta "o que aconteceu com esta demanda?" exigiria juntar pedaços na mão.
+ *
  * <p>O identificador do listener existe para que os testes possam iniciá-lo sob demanda, mantendo
  * determinístico o que de outro modo seria uma corrida com o consumo em segundo plano.
  */
@@ -35,13 +43,23 @@ public class LegalCaseReceivedEventListener {
     private static final Logger log = LoggerFactory.getLogger(LegalCaseReceivedEventListener.class);
 
     private final ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService;
+    private final ObjectProvider<Tracer> tracer;
 
-    public LegalCaseReceivedEventListener(ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService) {
+    public LegalCaseReceivedEventListener(
+            ProcessLegalCaseReceivedEventService processLegalCaseReceivedEventService, ObjectProvider<Tracer> tracer) {
         this.processLegalCaseReceivedEventService = processLegalCaseReceivedEventService;
+        this.tracer = tracer;
     }
 
     @RabbitListener(id = LISTENER_ID, queues = RabbitMqConfiguration.LEGAL_CASE_RECEIVED_QUEUE)
     public void onLegalCaseReceived(LegalCaseReceivedEvent event) {
+        try (LegalCaseCorrelation correlation =
+                LegalCaseCorrelation.open(tracer.getIfAvailable(), event.legalCaseId())) {
+            handle(event);
+        }
+    }
+
+    private void handle(LegalCaseReceivedEvent event) {
         LegalCaseProcessingResult result = processLegalCaseReceivedEventService.process(event);
 
         if (result.isSkipped()) {

@@ -9,6 +9,7 @@ import com.lexflow.application.knowledge.EmbeddingException;
 import com.lexflow.application.knowledge.EmbeddingRequestRejectedException;
 import com.lexflow.application.knowledge.EmbeddingUnavailableException;
 import com.lexflow.domain.knowledge.Embedding;
+import com.lexflow.infrastructure.observability.ExternalCallMetrics;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -19,6 +20,7 @@ import io.github.resilience4j.reactor.retry.RetryOperator;
 import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
+import io.micrometer.core.instrument.Timer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -73,6 +75,7 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
     private final CircuitBreaker circuitBreaker;
     private final TimeLimiter timeLimiter;
     private final Bulkhead bulkhead;
+    private final ExternalCallMetrics metrics;
 
     public VoyageEmbeddingClient(
             WebClient webClient,
@@ -81,7 +84,8 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
             Retry retry,
             CircuitBreaker circuitBreaker,
             TimeLimiter timeLimiter,
-            Bulkhead bulkhead) {
+            Bulkhead bulkhead,
+            ExternalCallMetrics metrics) {
         this.webClient = Objects.requireNonNull(webClient, "webClient não pode ser nulo");
         this.properties = Objects.requireNonNull(properties, "properties não pode ser nulo");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper não pode ser nulo");
@@ -89,6 +93,7 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
         this.circuitBreaker = Objects.requireNonNull(circuitBreaker, "circuitBreaker não pode ser nulo");
         this.timeLimiter = Objects.requireNonNull(timeLimiter, "timeLimiter não pode ser nulo");
         this.bulkhead = Objects.requireNonNull(bulkhead, "bulkhead não pode ser nulo");
+        this.metrics = Objects.requireNonNull(metrics, "metrics não pode ser nulo");
     }
 
     @Override
@@ -135,6 +140,7 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
 
         ObjectNode body = buildBody(texts, inputType);
         long startedAt = System.nanoTime();
+        Timer.Sample sample = metrics.start();
         try {
             String payload = Mono.defer(() -> send(body))
                     .transformDeferred(BulkheadOperator.of(bulkhead))
@@ -143,6 +149,7 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
                     .transformDeferred(RetryOperator.of(retry))
                     .block();
             List<Embedding> embeddings = interpret(Objects.requireNonNull(payload), texts.size());
+            metrics.recordSuccess(sample, "embeddings", inputType, properties.model());
             log.info(
                     "Embeddings gerados: modelo={} tipo={} textos={} caracteres={} latência={}ms",
                     properties.model(),
@@ -153,6 +160,7 @@ public class VoyageEmbeddingClient implements EmbeddingClientPort {
             return embeddings;
         } catch (RuntimeException e) {
             RuntimeException translated = translate(Exceptions.unwrap(e));
+            metrics.record(sample, "embeddings", inputType, properties.model(), translated);
             log.warn(
                     "Falha ao gerar embeddings: modelo={} textos={} erro={} mensagem={} circuito={}",
                     properties.model(),

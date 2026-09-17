@@ -18,6 +18,7 @@ O princípio que guia o sistema: **a IA nunca decide sozinha**. Ela responde cit
 - Spring Security (HTTP Basic) para a API administrativa
 - Claude (Messages API da Anthropic) como LLM, chamado por `WebClient`, com Resilience4j (retry, circuit breaker, time limiter e bulkhead)
 - Voyage AI como provedor de embeddings da base normativa, no mesmo desenho de cliente e proteções
+- Micrometer e OpenTelemetry para métricas e tracing distribuído
 - Testcontainers para os testes de integração
 - JaCoCo para a verificação de cobertura
 
@@ -44,8 +45,8 @@ Os prompts de implementação ficam em `files/` e são executados em ordem.
 | 15 | API de revisão humana e decisão | concluído |
 | 16 | Log de auditoria imutável | concluído |
 | 17 | Revisão de resiliência e idempotência, com runbook | concluído |
-| 18 | Observabilidade e métricas de qualidade da IA | próximo |
-| 19 | Dataset de regressão de prompts | pendente |
+| 18 | Observabilidade e métricas de qualidade da IA | concluído |
+| 19 | Dataset de regressão de prompts | próximo |
 
 Hoje o fluxo está completo da ingestão à decisão humana:
 
@@ -501,6 +502,52 @@ Uma revisão ponta a ponta das integrações externas, com o detalhe operacional
 
 **Testes de caos** (`PipelineChaosIT`): o provedor de LLM cai, volta, e a demanda retoma sozinha — sem dead-letter e sem processar nada duas vezes; com o consumidor fora do ar, as demandas esperam na fila e são processadas quando ele volta. A queda do banco não é automatizada, porque pausar o container derrubaria o contexto Spring compartilhado por toda a suíte; o comportamento esperado está no runbook.
 
+### Observabilidade (`lexflow-infrastructure` e `lexflow-api`)
+
+**Correlação por demanda.** Tudo o que acontece em uma demanda carrega o `legalCaseId` em três lugares ao mesmo tempo, e cada um responde a uma pergunta diferente:
+
+| Onde | Para quê |
+|---|---|
+| MDC | Todo log do trecho sai com o identificador — é assim que se responde "o que aconteceu com esta demanda?" |
+| Baggage do trace | O identificador viaja pela fila e chega a outra réplica; sem isso, o processamento assíncrono apareceria desligado da requisição que o originou |
+| Atributo do span | O trace fica pesquisável por demanda, sem casar log com trace na mão |
+
+O escopo é sempre fechado ao fim do bloco: um MDC que vaza faz a próxima demanda aparecer com o identificador da anterior — pior do que não ter correlação, porque parece informação boa.
+
+**Métricas técnicas** (em `/actuator/prometheus`):
+
+| Métrica | O que responde |
+|---|---|
+| `lexflow.external.call` | Latência e taxa de erro de cada integração (`llm`, `embeddings`, `storage`), com o desfecho como etiqueta |
+| `lexflow.queue.depth` | Mensagens esperando em cada fila, lidas do próprio broker |
+| `lexflow.legal_case.time_to_review` | Tempo da criação até a demanda ficar pronta para uma pessoa, por tipo |
+| `lexflow.legal_case.status_transitions` | Por onde o pipeline está passando |
+
+Nenhuma etiqueta carrega conteúdo de documento nem identificador de demanda: além de violar a seção 12, isso explodiria a cardinalidade das séries.
+
+**Métrica de negócio central: concordância IA × humano.**
+
+```bash
+curl -u admin:lexflow-admin http://localhost:8080/api/v1/metrics/ai-human-agreement
+curl -u admin:lexflow-admin http://localhost:8080/api/v1/metrics/dashboard
+```
+
+A **IA nunca emite uma sugestão de decisão** — o princípio do projeto continua valendo. A "sugestão implícita" é uma leitura que o sistema faz do conjunto das respostas:
+
+| Leitura | Quando |
+|---|---|
+| `FAVORABLE` | Todas as perguntas respondidas, nenhuma verificação reprovada, nenhuma resposta sem fundamento, nenhum alerta em aberto e confiança mínima de 0,7 |
+| `UNFAVORABLE` | Qualquer um desses pontos falha |
+| `INCONCLUSIVE` | Sem respostas; não conta como acerto nem como erro |
+
+Concordar é a leitura favorável corresponder a `APPROVED`, e a desfavorável, a qualquer outro desfecho. A taxa vem **nula** — e não zero — quando ainda não há caso conclusivo: zero seria lido como "a IA erra sempre", que é uma afirmação bem diferente de "ainda não dá para dizer".
+
+O cálculo vem da visão `ai_human_agreement` (migration `V10`), e não de uma tabela nova: o dado já existe em `ai_analysis_responses`, `decisions` e `legal_case_alerts`, e duplicá-lo criaria uma terceira versão da verdade que poderia divergir das outras duas.
+
+**Tracing distribuído.** `observation-enabled` no template e no listener do RabbitMQ costura ingestão, fila e processamento em um trace só. A amostragem é de 10% em produção e zero no perfil `dev`, onde normalmente não há coletor — suba `LEXFLOW_TRACING_SAMPLING` quando houver um Jaeger ou um collector escutando em `LEXFLOW_OTLP_ENDPOINT`.
+
+**Log estruturado.** JSON no formato ECS apenas em `prod`: em desenvolvimento, o log legível vale mais do que o log consultável.
+
 ### Cliente LLM (`lexflow-infrastructure`)
 
 `AnthropicMessagesClient` implementa a `LlmClientPort` chamando `POST /v1/messages` da Anthropic por `WebClient`, como pede o Prompt 10. É um cliente HTTP genérico: não conhece demanda, pergunta jurídica nem RAG. O primeiro caso de uso a chamá-lo é a extração de fatos (Prompt 11).
@@ -613,6 +660,8 @@ Nos testes da API, o `LlmClientPort` é sempre o `StubLlmClient`: nenhum teste a
 - **Critério de aceite.** O `LegalCaseFactExtractionIT` confere que os fatos gravados do contrato batem com o gabarito e que uma extração malformada nunca é gravada, gerando o alerta.
 - **Demais níveis.** A lógica é coberta sem Docker em `ExtractLegalFactsUseCaseTest`. O `FactExtractionSchemaValidationTest` confere o schema e o gabarito com o validador real, e o `FactExtractionPersistenceIT` confere o prompt semeado e as restrições no banco.
 
+A observabilidade é coberta em `LegalCaseCorrelationTest` (o identificador entra no log, no trace e no span, e não vaza para o trabalho seguinte), `FindOperationalMetricsServiceTest` (a matemática da concordância, inclusive a taxa nula quando não há o que medir) e `MetricsIT`, que roda o critério de aceite do Prompt 18 de ponta a ponta — concordância calculável a partir de casos decididos e métricas técnicas no formato Prometheus.
+
 A trilha de auditoria é coberta em `AuditLogPersistenceIT` (a recusa de alterar, apagar e esvaziar, pelos dois caminhos) e em `LegalCaseAuditLogIT`, onde o critério de aceite do Prompt 16 é a linha do tempo reconstruindo a história de um caso de ponta a ponta — ingestão, IA e decisão.
 
 A revisão humana é coberta em `RegisterDecisionServiceTest` e `ResubmitDocumentationServiceTest` (os três desfechos, a idempotência por escopo, a devolução sem comentários e a reabertura) e, de ponta a ponta, em `LegalCaseReviewIT`, onde o critério de aceite do Prompt 15 é reenviar a mesma decisão com a mesma `Idempotency-Key` sem gerar duas linhas em `decisions` nem duas transições.
@@ -692,6 +741,9 @@ O arquivo de configuração é `lexflow-api/src/main/resources/application.yml`.
 | `LEXFLOW_STORAGE_CIRCUIT_OPEN_WAIT` | Tempo com o circuito do storage aberto (padrão `15s`) |
 | `LEXFLOW_IDEMPOTENCY_RETENTION` | Por quanto tempo uma chave processada continua sendo reconhecida (padrão `30d`) |
 | `LEXFLOW_IDEMPOTENCY_CLEANUP_ENABLED` / `_INTERVAL` / `_BATCH` | Job de expiração das chaves (padrão ligado, `1h`, `1000`) |
+| `LEXFLOW_TRACING_SAMPLING` | Proporção de requisições rastreadas (padrão `0.1`; `0.0` no perfil `dev`) |
+| `LEXFLOW_OTLP_ENDPOINT` | Coletor OpenTelemetry (padrão `http://localhost:4318/v1/traces`) |
+| `LEXFLOW_ENVIRONMENT` | Etiqueta de ambiente em toda métrica (padrão `local`) |
 | `LEXFLOW_ADMIN_USERNAME` | Usuário da API administrativa (padrão `admin` no perfil `dev`; obrigatório em `prod`) |
 | `LEXFLOW_ADMIN_PASSWORD` | Senha da API administrativa, em texto ou `{bcrypt}...` (padrão `lexflow-admin` no perfil `dev`; obrigatória em `prod`) |
 | `ANTHROPIC_API_KEY` | Chave da API da Anthropic; sem ela, as chamadas ao LLM falham, mas a aplicação sobe |

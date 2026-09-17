@@ -248,6 +248,7 @@ Migrations Flyway em `lexflow-infrastructure/src/main/resources/db/migration`:
 | `V7__legal_analysis.sql` | `ai_analysis_responses.answer_source`, restrição de rastreabilidade, índice único por pergunta e o prompt `LEGAL_ANALYSIS` v1 (Prompt 13) |
 | `V8__answer_verification.sql` | `ai_analysis_responses.verification_status` e `verification_notes`, e o prompt `ANSWER_VERIFICATION` v1 (Prompt 14) |
 | `V9__audit_log_append_only.sql` | `audit_logs.legal_case_id` e o gatilho que torna a trilha append-only (Prompt 16) |
+| `V10__ai_human_agreement.sql` | visão `ai_human_agreement`, base da métrica de concordância entre a IA e o revisor (Prompt 18) |
 
 Uma migration aplicada nunca é editada: toda mudança de schema entra em uma migration nova, e esta seção deve ser atualizada junto.
 
@@ -282,7 +283,7 @@ Regra: `domain` não depende de nenhum framework. `application` depende só de `
 - **Cliente HTTP para LLM:** `WebClient` (Spring WebFlux, só como cliente; o servidor continua sendo o Tomcat), chamando a Messages API da Anthropic (`POST /v1/messages`). O modelo padrão é `claude-opus-5`.
 - **Embeddings (RAG):** provedor separado do LLM, também por `WebClient`, no formato `POST /v1/embeddings` (`input`, `model`, `input_type`, `output_dimension`). O padrão é a Voyage AI, com o modelo `voyage-3-large` em 1536 dimensões. A justificativa da separação está na seção 14 (Prompt 12).
 - **Resiliência:** Resilience4j (circuit breaker, retry, timeout, bulkhead), configurado em `resilience4j.*.instances.<nome>` no `application.yml`
-- **Observabilidade:** Micrometer + OpenTelemetry
+- **Observabilidade:** Micrometer (métricas, expostas em `/actuator/prometheus`) e Micrometer Tracing com OpenTelemetry (exportação OTLP). Log estruturado em JSON (ECS) apenas no perfil `prod`
 - **Testes:** JUnit 5, AssertJ, Awaitility e Testcontainers (PostgreSQL com pgvector, RabbitMQ, MinIO). Os testes de OCR exigem o Tesseract instalado.
 - **Cobertura:** JaCoCo, com a verificação de 80% de `domain` e `application` rodando no `./gradlew build`
 
@@ -598,3 +599,13 @@ Esta seção consolida as decisões tomadas durante a implementação que não c
 - **Escopo da chave.** Todas convivem em um índice único só; o prefixo do `IdempotencyNamespace` é o que impede que a mesma chave, usada em dois endpoints, seja confundida com uma repetição.
 - **Testes de caos.** `PipelineChaosIT` prova o critério de aceite: o LLM cai, volta, e a demanda retoma sozinha, sem dead-letter e sem processar nada duas vezes. A queda do banco não é automatizada — pausar o container derrubaria o contexto Spring compartilhado por toda a suíte —, e o comportamento esperado está no runbook.
 - **Runbook.** `docs/resilience-runbook.md` lista cada ponto de falha, o que acontece, quando um operador precisa agir e como republicar mensagens da dead-letter.
+
+**Observabilidade (Prompt 18)**
+- **Correlação por demanda.** `LegalCaseCorrelation` amarra o `legalCaseId` em três lugares ao mesmo tempo: no MDC (todo log do trecho sai com ele), no baggage do trace (viaja pela fila até outra réplica) e como atributo do span (o trace fica pesquisável por demanda). O escopo é sempre fechado: um MDC que vaza faz a próxima demanda aparecer com o identificador da anterior, o que é pior do que não ter correlação.
+- **Trace distribuído.** `observation-enabled` no template e no listener do RabbitMQ costura ingestão, fila e processamento em um trace só. A amostragem é de 10% em produção e zero em `dev`, onde não há coletor.
+- **Métricas técnicas.** `lexflow.external.call` (latência e desfecho por integração: `llm`, `embeddings`, `storage`), `lexflow.queue.depth` (lido do broker por coleta periódica), `lexflow.legal_case.time_to_review` (por tipo de demanda) e `lexflow.legal_case.status_transitions`. Nenhuma etiqueta carrega conteúdo ou identificador de demanda — além de violar a seção 12, explodiria a cardinalidade das séries.
+- **Onde a instrumentação mora.** Nas bordas: nos clientes externos e em um decorador do repositório de histórico (`Metered → Auditing → JPA`), pela mesma razão da auditoria — toda transição gera uma linha de histórico, então instrumentar a gravação cobre o pipeline inteiro sem tocar em nenhum caso de uso.
+- **Métrica de negócio central.** A visão `ai_human_agreement` (migration V10) relaciona, por demanda decidida, a **sugestão implícita** da IA e o desfecho humano. A IA nunca emite essa sugestão: ela é uma leitura do conjunto das respostas — `FAVORABLE` quando todas as perguntas foram respondidas, nenhuma verificação reprovou, nenhuma declara ausência de fundamento, não há alerta em aberto e a menor confiança é de pelo menos 0,7; `UNFAVORABLE` quando qualquer um desses pontos falha; `INCONCLUSIVE` quando não há respostas. Concordar é a sugestão favorável corresponder a `APPROVED`, e a desfavorável, a qualquer outro desfecho.
+- **Por que uma visão, e não uma tabela.** O dado já existe em `ai_analysis_responses`, `decisions` e `legal_case_alerts`. Duplicá-lo criaria uma terceira versão da verdade, que poderia divergir das outras duas — e a métrica deixaria de medir o sistema para medir a si mesma.
+- **Endpoints.** `GET /api/v1/metrics/ai-human-agreement` e `GET /api/v1/metrics/dashboard`, ambos com papel `ADMIN`. Devolvem JSON para consumo por Grafana ou Metabase; o painel visual não é do sistema.
+- **Log estruturado.** JSON no formato ECS apenas no perfil `prod`: em desenvolvimento, o log legível vale mais do que o log consultável.

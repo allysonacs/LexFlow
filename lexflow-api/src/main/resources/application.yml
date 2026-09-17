@@ -33,6 +33,9 @@ spring:
     virtual-host: ${LEXFLOW_RABBITMQ_VHOST:/}
     listener:
       simple:
+        # Propaga o trace da ingestão até o consumidor: sem isso, o processamento assíncrono
+        # apareceria como um trace solto, sem ligação com a requisição que o originou (Prompt 18).
+        observation-enabled: true
         # Uma demanda por vez em cada thread do consumidor; o paralelismo vem de mais réplicas.
         concurrency: ${LEXFLOW_RABBITMQ_CONCURRENCY:2}
         max-concurrency: ${LEXFLOW_RABBITMQ_MAX_CONCURRENCY:8}
@@ -52,6 +55,8 @@ spring:
           multiplier: 3
           max-interval: 60s
     template:
+      # Junto com o observation-enabled do listener, é isto que costura o trace através da fila.
+      observation-enabled: true
       retry:
         # Backoff também na publicação: um broker momentaneamente indisponível não pode
         # derrubar a ingestão (seção 11).
@@ -277,11 +282,35 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       probes:
         enabled: true
+  # Observabilidade (Prompt 18).
+  metrics:
+    tags:
+      # Toda métrica sai identificada pela aplicação e pelo ambiente, para um painel conseguir
+      # separar réplicas e instalações.
+      application: lexflow
+      environment: ${LEXFLOW_ENVIRONMENT:local}
+  observations:
+    key-values:
+      application: lexflow
+  tracing:
+    sampling:
+      # Amostragem, e não tudo: o valor de um trace está em representar o fluxo, não em registrar
+      # cada requisição. Em investigação, suba temporariamente para 1.0.
+      probability: ${LEXFLOW_TRACING_SAMPLING:0.1}
+    baggage:
+      # O identificador da demanda viaja com o trace e entra no MDC de todo log daquele fluxo —
+      # inclusive depois da fila, em outra réplica. É ele que costura ingestão, IA e decisão.
+      remote-fields: legalCaseId
+      correlation:
+        fields: legalCaseId
+  otlp:
+    tracing:
+      endpoint: ${LEXFLOW_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
 
 ---
 spring:
@@ -308,6 +337,11 @@ lexflow:
       password: ${LEXFLOW_ADMIN_PASSWORD:lexflow-admin}
 
 management:
+  # Sem coletor OTLP no ambiente local, exportar traces só geraria erro de conexão no log. Suba a
+  # amostragem quando houver um coletor (ou um Jaeger) escutando.
+  tracing:
+    sampling:
+      probability: ${LEXFLOW_TRACING_SAMPLING:0.0}
   endpoint:
     health:
       show-details: always
@@ -328,3 +362,10 @@ management:
   endpoint:
     health:
       show-details: never
+
+# Log estruturado em JSON no formato ECS (Prompt 18, item 4). Fica só em produção: em
+# desenvolvimento, o log legível vale mais do que o log consultável.
+logging:
+  structured:
+    format:
+      console: ecs

@@ -14,6 +14,7 @@ import com.lexflow.application.llm.LlmResponseValidationException;
 import com.lexflow.application.llm.LlmStopReason;
 import com.lexflow.application.llm.LlmUnavailableException;
 import com.lexflow.application.llm.LlmUsage;
+import com.lexflow.infrastructure.observability.ExternalCallMetrics;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadFullException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -24,6 +25,7 @@ import io.github.resilience4j.reactor.retry.RetryOperator;
 import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
+import io.micrometer.core.instrument.Timer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -67,6 +69,10 @@ import reactor.core.publisher.Mono;
  * Falhas que não são do provedor — pedido recusado, resposta fora do schema, recusa do modelo — não
  * são repetidas nem contam para abrir o circuito.
  *
+ * <p><strong>Métricas.</strong> Cada chamada alimenta {@code lexflow.external.call} com a integração,
+ * o modelo e o desfecho (Prompt 18). Nenhuma etiqueta carrega conteúdo: só valores de cardinalidade
+ * baixa.
+ *
  * <p><strong>Nada de conteúdo no log.</strong> Em {@code INFO} saem só modelo, tokens, latência e
  * identificadores. Nem em {@code DEBUG} o prompt é registrado: apenas o tamanho e um hash, que
  * permitem correlacionar chamadas sem expor dados sensíveis (seção 12).
@@ -91,6 +97,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
     private final CircuitBreaker circuitBreaker;
     private final TimeLimiter timeLimiter;
     private final Bulkhead bulkhead;
+    private final ExternalCallMetrics metrics;
     private final Clock clock;
 
     public AnthropicMessagesClient(
@@ -102,6 +109,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
             CircuitBreaker circuitBreaker,
             TimeLimiter timeLimiter,
             Bulkhead bulkhead,
+            ExternalCallMetrics metrics,
             Clock clock) {
         this.webClient = Objects.requireNonNull(webClient, "webClient não pode ser nulo");
         this.properties = Objects.requireNonNull(properties, "properties não pode ser nulo");
@@ -111,6 +119,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
         this.circuitBreaker = Objects.requireNonNull(circuitBreaker, "circuitBreaker não pode ser nulo");
         this.timeLimiter = Objects.requireNonNull(timeLimiter, "timeLimiter não pode ser nulo");
         this.bulkhead = Objects.requireNonNull(bulkhead, "bulkhead não pode ser nulo");
+        this.metrics = Objects.requireNonNull(metrics, "metrics não pode ser nulo");
         this.clock = Objects.requireNonNull(clock, "clock não pode ser nulo");
     }
 
@@ -134,6 +143,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
                     fingerprint(request.prompt()));
         }
 
+        Timer.Sample sample = metrics.start();
         try {
             RawResponse raw = Mono.defer(() -> send(body))
                     .transformDeferred(BulkheadOperator.of(bulkhead))
@@ -142,6 +152,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
                     .transformDeferred(RetryOperator.of(retry))
                     .block();
             LlmResponse response = interpret(request, model, Objects.requireNonNull(raw), startedAt);
+            metrics.recordSuccess(sample, "llm", "messages", response.model());
             log.info(
                     "Chamada ao LLM concluída: modelo={} (pedido={}) stopReason={} tokens[entrada={}, saída={}, cache={}] latência={}ms requestId={}",
                     response.model(),
@@ -155,6 +166,7 @@ public class AnthropicMessagesClient implements LlmClientPort {
             return response;
         } catch (RuntimeException e) {
             RuntimeException translated = translate(Exceptions.unwrap(e));
+            metrics.record(sample, "llm", "messages", model, translated);
             log.warn(
                     "Chamada ao LLM falhou: modelo={} erro={} mensagem={} circuito={} duração={}ms",
                     model,

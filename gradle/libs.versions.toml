@@ -33,6 +33,14 @@ spring-boot-testcontainers = { module = "org.springframework.boot:spring-boot-te
 
 hibernate-vector = { module = "org.hibernate.orm:hibernate-vector", version.ref = "hibernate" }
 
+# Observabilidade (Prompt 18). As versões vêm do BOM do Spring Boot, que já alinha Micrometer,
+# Micrometer Tracing e OpenTelemetry entre si.
+micrometer-registry-prometheus = { module = "io.micrometer:micrometer-registry-prometheus" }
+micrometer-tracing = { module = "io.micrometer:micrometer-tracing" }
+micrometer-tracing-test = { module = "io.micrometer:micrometer-tracing-test" }
+micrometer-tracing-bridge-otel = { module = "io.micrometer:micrometer-tracing-bridge-otel" }
+opentelemetry-exporter-otlp = { module = "io.opentelemetry:opentelemetry-exporter-otlp" }
+
 # BOM do AWS SDK: alinha as versões dos módulos do SDK entre si.
 awssdk-bom = { module = "software.amazon.awssdk:bom", version.ref = "awssdk" }
 awssdk-s3 = { module = "software.amazon.awssdk:s3" }

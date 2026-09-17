@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lexflow.infrastructure.observability.ExternalCallMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.lexflow.application.llm.LlmRequest;
 import com.lexflow.application.llm.LlmRequestRejectedException;
 import io.github.resilience4j.bulkhead.Bulkhead;
@@ -73,6 +75,7 @@ class LlmClientPropertiesTest {
                 CircuitBreaker.ofDefaults("teste"),
                 TimeLimiter.ofDefaults("teste"),
                 Bulkhead.ofDefaults("teste"),
+                new ExternalCallMetrics(new SimpleMeterRegistry()),
                 Clock.systemUTC());
 
         assertThatExceptionOfType(LlmRequestRejectedException.class)

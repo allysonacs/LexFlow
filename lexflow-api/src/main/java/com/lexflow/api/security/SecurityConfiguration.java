@@ -48,6 +48,14 @@ public class SecurityConfiguration {
      */
     public static final String KNOWLEDGE_BASE_PATHS = "/api/v1/knowledge-base/**";
 
+    /**
+     * Métricas agregadas (Prompt 18).
+     *
+     * <p>Protegidas porque são números do negócio inteiro — volume de demandas, tempos, concordância
+     * entre a IA e os revisores —, e não de um caso.
+     */
+    public static final String METRICS_PATHS = "/api/v1/metrics/**";
+
     public static final String ADMIN_ROLE = "ADMIN";
 
     @Bean
@@ -56,7 +64,7 @@ public class SecurityConfiguration {
         return http.csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(ADMIN_PATHS, KNOWLEDGE_BASE_PATHS).hasRole(ADMIN_ROLE)
+                        .requestMatchers(ADMIN_PATHS, KNOWLEDGE_BASE_PATHS, METRICS_PATHS).hasRole(ADMIN_ROLE)
                         .anyRequest().permitAll())
                 .httpBasic(basic -> basic.authenticationEntryPoint((request, response, e) -> writeError(
                         objectMapper, clock, request, response, HttpStatus.UNAUTHORIZED, ApiErrorCodes.UNAUTHORIZED,

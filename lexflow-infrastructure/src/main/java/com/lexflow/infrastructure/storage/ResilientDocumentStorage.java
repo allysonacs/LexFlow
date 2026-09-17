@@ -7,11 +7,14 @@ import com.lexflow.application.exception.DocumentNotFoundInStorageException;
 import com.lexflow.application.exception.DocumentStorageException;
 import com.lexflow.domain.document.DocumentFormat;
 import com.lexflow.domain.document.Sha256Checksum;
+import com.lexflow.infrastructure.observability.ExternalCallMetrics;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.springframework.context.annotation.Primary;
@@ -46,35 +49,52 @@ public class ResilientDocumentStorage implements DocumentStoragePort {
     private final S3DocumentStorageAdapter delegate;
     private final Retry retry;
     private final CircuitBreaker circuitBreaker;
+    private final ExternalCallMetrics metrics;
 
     public ResilientDocumentStorage(
             S3DocumentStorageAdapter delegate,
             RetryRegistry retryRegistry,
-            CircuitBreakerRegistry circuitBreakerRegistry) {
+            CircuitBreakerRegistry circuitBreakerRegistry,
+            MeterRegistry meterRegistry) {
         this.delegate = delegate;
         this.retry = retryRegistry.retry(RESILIENCE_INSTANCE);
         this.circuitBreaker = circuitBreakerRegistry.circuitBreaker(RESILIENCE_INSTANCE);
+        this.metrics = new ExternalCallMetrics(meterRegistry);
     }
 
     @Override
     public StoredDocument store(
             UUID legalCaseId, DocumentFormat format, Sha256Checksum checksum, DocumentUpload upload) {
-        return protect(() -> delegate.store(legalCaseId, format, checksum, upload));
+        return protect("store", () -> delegate.store(legalCaseId, format, checksum, upload));
     }
 
     @Override
     public byte[] retrieve(String storagePath) {
-        return protect(() -> delegate.retrieve(storagePath));
+        return protect("retrieve", () -> delegate.retrieve(storagePath));
     }
 
-    /** Aplica circuit breaker e retry, traduzindo o circuito aberto na exceção da porta. */
-    private <T> T protect(Supplier<T> operation) {
+    /**
+     * Aplica circuit breaker e retry, mede a chamada e traduz o circuito aberto na exceção da porta.
+     *
+     * <p>A medição envolve o retry, e não cada tentativa: o que interessa a quem opera é quanto tempo
+     * a operação levou para dar certo ou desistir, e não quantas vezes ela foi tentada por dentro —
+     * isso já está nas métricas do próprio Resilience4j.
+     */
+    private <T> T protect(String operation, Supplier<T> action) {
+        Timer.Sample sample = metrics.start();
         try {
-            return Retry.decorateSupplier(retry, CircuitBreaker.decorateSupplier(circuitBreaker, operation))
+            T result = Retry.decorateSupplier(retry, CircuitBreaker.decorateSupplier(circuitBreaker, action))
                     .get();
+            metrics.recordSuccess(sample, "storage", operation, null);
+            return result;
         } catch (CallNotPermittedException e) {
-            throw new DocumentStorageException(
+            DocumentStorageException translated = new DocumentStorageException(
                     "Circuito do storage de documentos aberto: chamadas suspensas temporariamente", e);
+            metrics.record(sample, "storage", operation, null, translated);
+            throw translated;
+        } catch (RuntimeException e) {
+            metrics.record(sample, "storage", operation, null, e);
+            throw e;
         }
     }
 }

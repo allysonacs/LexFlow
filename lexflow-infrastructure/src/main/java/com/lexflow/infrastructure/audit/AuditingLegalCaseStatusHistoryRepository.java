@@ -12,7 +12,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Supplier;
-import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 /**
@@ -24,9 +23,12 @@ import org.springframework.stereotype.Component;
  * de uso precise lembrar de chamar a trilha.
  *
  * <p>O registro inicial, aquele sem status anterior, é a criação da demanda.
+ *
+ * <p>Este decorador não é o {@code @Primary}: quem responde pela porta é o
+ * {@link com.lexflow.infrastructure.observability.MeteredLegalCaseStatusHistoryRepository}, que
+ * envolve este. A cadeia é {@code Metered → Auditing → JPA}, e as duas pontas observam sem participar.
  */
 @Component
-@Primary
 public class AuditingLegalCaseStatusHistoryRepository implements LegalCaseStatusHistoryRepository {
 
     private final LegalCaseStatusHistoryRepositoryAdapter delegate;

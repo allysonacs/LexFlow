@@ -23,6 +23,10 @@ dependencies {
     // Cliente LLM (Prompt 10): WebClient reativo, Resilience4j e validação de JSON Schema.
     implementation(libs.spring.boot.starter.webflux)
     implementation(libs.spring.boot.starter.aop)
+    // Métricas das integrações externas e correlação por legal_case_id (Prompt 18). Só a API do
+    // Micrometer Tracing: a implementação (a ponte para o OpenTelemetry) é escolhida em lexflow-api.
+    implementation(libs.spring.boot.starter.actuator)
+    implementation(libs.micrometer.tracing)
     implementation(libs.resilience4j.spring.boot3)
     implementation(libs.resilience4j.reactor)
     implementation(libs.json.schema.validator)
@@ -44,5 +48,7 @@ dependencies {
     testImplementation(platform(libs.awssdk.bom))
     testImplementation(libs.awssdk.s3)
     testImplementation(libs.wiremock.standalone)
+    // SimpleTracer: permite verificar a correlação por demanda sem subir um coletor (Prompt 18).
+    testImplementation(libs.micrometer.tracing.test)
     testImplementation(libs.awaitility)
 }

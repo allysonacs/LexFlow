@@ -5,6 +5,7 @@ import com.lexflow.api.support.StubLlmClientConfiguration;
 import com.lexflow.infrastructure.testsupport.MinioTestcontainersConfiguration;
 import com.lexflow.infrastructure.testsupport.PostgresTestcontainersConfiguration;
 import com.lexflow.infrastructure.testsupport.RabbitMqTestcontainersConfiguration;
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 
@@ -22,8 +23,13 @@ import org.springframework.context.annotation.Import;
  * {@link com.lexflow.infrastructure.testsupport.LexicalEmbeddingClient}: nenhum teste chama um
  * provedor externo.
  *
+ * <p>A observabilidade fica ligada: por padrão, o Spring Boot desliga exportação de métricas e
+ * tracing nos testes, e sem ela as métricas do Prompt 18 simplesmente não existiriam para serem
+ * verificadas. A amostragem de traces continua em zero no perfil {@code dev}, então nada é exportado.
+ *
  * <p>Requer Docker em execução.
  */
+@AutoConfigureObservability
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({
     PostgresTestcontainersConfiguration.class,

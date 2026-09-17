@@ -8,6 +8,8 @@ import com.lexflow.application.document.DocumentStoragePort;
 import com.lexflow.application.document.StoreDocumentsService;
 import com.lexflow.application.idempotency.IdempotentOperationStore;
 import com.lexflow.application.knowledge.KnowledgeBaseRetriever;
+import com.lexflow.application.metrics.FindOperationalMetricsService;
+import com.lexflow.application.metrics.OperationalMetricsRepository;
 import com.lexflow.application.legalcase.LegalCaseReceivedEventPublisher;
 import com.lexflow.application.legalcase.LegalCaseRepository;
 import com.lexflow.application.legalcase.LegalCaseStatusHistoryRepository;
@@ -36,6 +38,13 @@ public class ReviewConfiguration {
     @Bean
     public StoreDocumentsService storeDocumentsService(DocumentStoragePort documentStorage) {
         return new StoreDocumentsService(documentStorage, UUID::randomUUID);
+    }
+
+    /** Métricas agregadas de negócio (Prompt 18). */
+    @Bean
+    public FindOperationalMetricsService findOperationalMetricsService(
+            OperationalMetricsRepository metricsRepository, Clock clock) {
+        return new FindOperationalMetricsService(metricsRepository, clock);
     }
 
     @Bean

@@ -1,12 +1,16 @@
 package com.lexflow.infrastructure.llm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lexflow.infrastructure.observability.ExternalCallMetrics;
 import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.ChannelOption;
 import java.time.Clock;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -55,6 +59,7 @@ public class LlmClientConfiguration {
             CircuitBreakerRegistry circuitBreakerRegistry,
             TimeLimiterRegistry timeLimiterRegistry,
             BulkheadRegistry bulkheadRegistry,
+            ObjectProvider<MeterRegistry> meterRegistry,
             Clock clock) {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) properties.connectTimeout().toMillis())
@@ -73,6 +78,9 @@ public class LlmClientConfiguration {
                 circuitBreakerRegistry.circuitBreaker(instance),
                 timeLimiterRegistry.timeLimiter(instance),
                 bulkheadRegistry.bulkhead(instance),
+                // Sem registro de métricas no contexto — o caso de um teste enxuto —, o cliente
+                // continua funcionando e as medições simplesmente não vão a lugar nenhum.
+                new ExternalCallMetrics(meterRegistry.getIfAvailable(SimpleMeterRegistry::new)),
                 clock);
     }
 }

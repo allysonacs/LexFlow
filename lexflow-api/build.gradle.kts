@@ -13,6 +13,10 @@ dependencies {
     implementation(libs.spring.boot.starter.actuator)
     // Protege a API administrativa (Prompt 09); os demais endpoints seguem abertos até o prompt de segurança.
     implementation(libs.spring.boot.starter.security)
+    // Observabilidade (Prompt 18): métricas em formato Prometheus e tracing distribuído por OpenTelemetry.
+    implementation(libs.micrometer.registry.prometheus)
+    implementation(libs.micrometer.tracing.bridge.otel)
+    implementation(libs.opentelemetry.exporter.otlp)
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(testFixtures(project(":lexflow-infrastructure")))
